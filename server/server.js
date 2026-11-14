@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import axios from 'axios';
 import { GoogleGenAI } from '@google/genai';
 import { supabase } from './db.js';
 
@@ -131,6 +132,112 @@ app.post('/api/gestures', authMiddleware, async (req, res) => {
   res.json(data);
 });
 
+// --- 100% FREE, ZERO-CARD REAL-WORLD WALKING ROUTE ENGINE ---
+app.post('/api/maps/route', authMiddleware, async (req, res) => {
+  const { originLat, originLng, destination } = req.body;
+  if (!originLat || !originLng || !destination) {
+    return res.status(400).json({ error: 'Origin GPS coordinates and destination are required.' });
+  }
+
+  // Clean filler words like "nearest" so OpenStreetMap finds the closest matching place near user GPS
+  const cleanQuery = destination.replace(/\b(nearest|nearby|closest|find|the)\b/gi, '').replace(/\s+/g, ' ').trim() || destination;
+  let resolvedName = destination;
+  let destCoords = null;
+
+  try {
+    // 1. Search real-world place biased to user's live GPS (Free Photon OpenStreetMap Geocoder)
+    try {
+      const photonRes = await axios.get(
+        `https://photon.komoot.io/api/?q=${encodeURIComponent(cleanQuery)}&limit=1&lang=en&lat=${originLat}&lon=${originLng}`,
+        { timeout: 7000 }
+      );
+      const feature = photonRes.data?.features?.[0];
+      if (feature?.geometry?.coordinates) {
+        const [lng, lat] = feature.geometry.coordinates;
+        destCoords = { lat, lng };
+        const props = feature.properties || {};
+        resolvedName = [props.name, props.street, props.city].filter(Boolean).join(', ') || destination;
+      }
+    } catch {}
+
+    // 2. Backup place search near user's GPS (Free Nominatim Geocoder)
+    if (!destCoords) {
+      const delta = 0.08;
+      const viewbox = `${Number(originLng) - delta},${Number(originLat) + delta},${Number(originLng) + delta},${Number(originLat) - delta}`;
+      const nomRes = await axios.get(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanQuery)}&viewbox=${viewbox}&limit=1`,
+        { headers: { 'User-Agent': 'ForYouAI-AccessibilityApp/1.0' }, timeout: 7000 }
+      );
+      if (nomRes.data?.[0]) {
+        destCoords = {
+          lat: parseFloat(nomRes.data[0].lat),
+          lng: parseFloat(nomRes.data[0].lon)
+        };
+        resolvedName = nomRes.data[0].display_name.split(',').slice(0, 2).join(', ');
+      }
+    }
+
+    if (!destCoords) {
+      return res.status(404).json({ error: `Could not find "${destination}". Try saying a nearby area or landmark name.` });
+    }
+
+    // 3. Generate real-world pedestrian turn-by-turn walking route (Free OSRM Foot Router)
+    const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${originLng},${originLat};${destCoords.lng},${destCoords.lat}?steps=true&geometries=geojson&overview=full`;
+    const osrmRes = await axios.get(osrmUrl, { timeout: 8000 });
+    const route = osrmRes.data?.routes?.[0];
+    const rawSteps = route?.legs?.[0]?.steps || [];
+
+    if (!rawSteps.length) {
+      return res.status(404).json({ error: `No walking route found to "${destination}".` });
+    }
+
+    const steps = rawSteps.map((s, idx) => {
+      const type = s.maneuver?.type || 'continue';
+      const modifier = (s.maneuver?.modifier || '').replace('-', ' ');
+      const roadName = s.name ? ` onto ${s.name}` : '';
+      const dist = Math.max(5, Math.round(s.distance || 0));
+
+      let direction = 'STRAIGHT';
+      if (modifier.includes('left')) direction = 'LEFT';
+      else if (modifier.includes('right')) direction = 'RIGHT';
+      else if (type === 'arrive' || idx === rawSteps.length - 1) direction = 'ARRIVED';
+
+      let instruction = '';
+      if (type === 'arrive' || idx === rawSteps.length - 1) {
+        instruction = `You have arrived at ${resolvedName}.`;
+      } else if (type === 'depart') {
+        instruction = `Head ${modifier || 'straight'}${s.name ? ` on ${s.name}` : ''} for ${dist} meters.`;
+      } else if (modifier) {
+        instruction = `Turn ${modifier}${roadName} and walk ${dist} meters.`;
+      } else {
+        instruction = `Continue straight${roadName} for ${dist} meters.`;
+      }
+
+      return {
+        id: idx,
+        instruction,
+        direction,
+        distance: dist,
+        location: s.maneuver?.location || null
+      };
+    });
+
+    const totalMeters = Math.round(route.distance || 0);
+    const durationMins = Math.max(1, Math.round((route.duration || 60) / 60));
+
+    return res.json({
+      destinationName: resolvedName,
+      totalDistance: totalMeters >= 1000 ? `${(totalMeters / 1000).toFixed(1)} km` : `${totalMeters} m`,
+      durationMins,
+      startCoords: { lat: Number(originLat), lng: Number(originLng) },
+      destCoords,
+      steps
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Unable to calculate walking route: ' + err.message });
+  }
+});
+
 // --- LIVE CAMERA AI OBSTACLE, NAVIGATION, CURRENCY & MEDICINE ENGINE ---
 app.post('/api/ai/analyze', authMiddleware, async (req, res) => {
   try {
@@ -228,7 +335,7 @@ app.get('/api/history', authMiddleware, async (req, res) => {
   res.json(data);
 });
 
-app.get('/', (req, res) => res.send('ForYou AI Backend Running on Gemini 3.8 Flash!'));
+app.get('/', (req, res) => res.send('ForYou AI Backend Running (100% Free Zero-Card Maps + Gemini 3.8)!'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`ForYou AI Server running on port ${PORT}`));
