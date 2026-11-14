@@ -16,7 +16,7 @@ app.use(cors({
   origin: true,
   credentials: true
 }));
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 // --- ZOD VALIDATION ---
 const registerSchema = z.object({
@@ -45,38 +45,16 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// --- GEMINI 3.8 HELPER (WITH FLASH-LITE BACKUP) ---
+// --- GEMINI 3.8 FLASH HELPER ---
 async function generateWithGemini38(contents) {
-  const models = ['gemini-3.8-flash', 'gemini-3.8-flash-lite'];
-  let lastError;
-
-  for (const modelName of models) {
-    try {
-      return await ai.models.generateContent({
-        model: modelName,
-        contents,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.2
-        }
-      });
-    } catch (err) {
-      lastError = err;
-      const msg = err.message || '';
-      if (
-        err.status === 429 ||
-        err.status === 503 ||
-        err.status === 404 ||
-        msg.includes('429') ||
-        msg.includes('503') ||
-        msg.includes('404')
-      ) {
-        continue;
-      }
-      throw err;
+  return await ai.models.generateContent({
+    model: 'gemini-3.8-flash',
+    contents,
+    config: {
+      responseMimeType: 'application/json',
+      temperature: 0.2
     }
-  }
-  throw lastError;
+  });
 }
 
 // --- AUTH ROUTES ---
@@ -153,10 +131,10 @@ app.post('/api/gestures', authMiddleware, async (req, res) => {
   res.json(data);
 });
 
-// --- UNIVERSAL MULTIMODAL AI ENGINE (PROXIMITY OBSTACLE + 4-FRAME SIGN BURST) ---
+// --- LIVE CAMERA AI OBSTACLE, NAVIGATION, CURRENCY & MEDICINE ENGINE ---
 app.post('/api/ai/analyze', authMiddleware, async (req, res) => {
   try {
-    const { feature_type, prompt_text, image_base64, images_base64, location_info, destination } = req.body;
+    const { feature_type, prompt_text, image_base64, location_info, destination } = req.body;
 
     const { data: userProfile } = await supabase.from('users').select('*').eq('id', req.user.id).single();
     const { data: userGestures } = await supabase.from('custom_gestures').select('*').eq('user_id', req.user.id);
@@ -165,4 +143,92 @@ app.post('/api/ai/analyze', authMiddleware, async (req, res) => {
       safe_route: `You are ForYou AI Live Mobility & Obstacle Avoidance Agent guiding a blind user walking toward: "${destination || prompt_text || 'Safe Clear Path'}".
 Live GPS: "${location_info || 'Active'}".
 Inspect the live camera image immediately like a human guide walking beside the blind person:
-1. OBSTACLE &
+1. OBSTACLE AND SIDE-STEP CHECK FIRST: Look straight ahead (11 to 1 o'clock). If ANY object, person, chair, table, parked bike, vehicle, wall, pillar, stairs, pothole, or barrier is blocking the path:
+   - Check which side (left at 9-10 o'clock or right at 2-3 o'clock) has open space.
+   - Start your instruction with an immediate action command: "Move Left! [Object] blocking ahead, step left toward 10 o'clock." OR "Move Right! [Object] blocking ahead, step right toward 2 o'clock." OR "Stop! [Danger/Wall/Stairs] right ahead."
+   - Set turn_direction to "LEFT", "RIGHT", or "STOP", and set hazard to true.
+2. CLEAR PATH: If the path ahead is open and safe, say "Path clear, walk straight ahead at 12 o'clock" and mention any helpful landmark or direction toward "${destination || 'the destination'}". Set turn_direction to "STRAIGHT" and hazard to false.
+3. Keep "en" very short, direct, and easy to hear while walking (maximum 1-2 short sentences).
+Return strictly valid JSON: {
+  "en": "Direct spoken obstacle avoidance and walking instruction",
+  "turn_direction": "STRAIGHT" | "LEFT" | "RIGHT" | "STOP" | "ARRIVED",
+  "landmark_spotted": "Object or landmark in front of camera",
+  "hazard": true/false
+}`,
+      vision_nav: `You are ForYou AI Real-Time Obstacle & Spatial Agent for a blind user. Look at the live camera frame:
+- If an object, person, furniture, doorway edge, or vehicle is in the way, tell the user immediately which side is clear: e.g., "Move right! Chair blocking at 12 o'clock, clear space at 2 o'clock."
+- If clear, say what is ahead with clock-face direction.
+Return strictly valid JSON: {"en": "short direct spoken guidance", "turn_direction": "STRAIGHT" | "LEFT" | "RIGHT" | "STOP", "hazard": true/false}`,
+      currency_med: `You are ForYou AI Currency & Medicine Identifier for a blind user. User medical allergies: "${userProfile?.allergies || 'None'}".
+Look closely at the camera image:
+1. If Indian currency notes or coins are visible, state the exact note value (e.g., "500 Rupees Indian note", "100 Rupees note", "50 Rupees note") and total sum.
+2. If a medicine strip, bottle, or tablet is visible, read the medicine name, purpose, dosage, and expiry date aloud clearly.
+3. Set hazard: true if expired or matching user allergies.
+Return strictly valid JSON: {"en": "Clear spoken currency amount or medicine details", "hazard": true/false}`,
+      sign_bridge: `You are ForYou AI Sign Language & AAC Interpreter. User's saved custom gestures: ${JSON.stringify(userGestures || [])}. Interpret hand gestures in the image or expand quick keywords into a polite spoken sentence. Return strictly valid JSON: {"en": "spoken English sentence", "hazard": false}`,
+      memory_vault: `You are ForYou AI Personal Memory Assistant. Describe the object in the camera and its exact surroundings/landmarks so the user can locate it later, or answer where an item was placed. Return strictly valid JSON: {"en": "detailed English spoken memory response", "hazard": false}`,
+      sos_alert: `EMERGENCY SOS from ForYou AI! Describe the user's exact surroundings, street landmarks, crowd level, and immediate hazards from the image to guide rescuers. GPS: ${location_info || 'Unknown'}. Guardian Contact: ${userProfile?.emergency_contact || 'Not set'}. Return strictly valid JSON: {"en": "Urgent rescue summary in English", "hazard": true}`,
+      form_reader: `You are ForYou AI Document Assistant. Read this form or document image aloud clearly. Summarize what it is for and list the key details or required fields. Return strictly valid JSON: {"en": "English spoken summary and fields", "hazard": false}`
+    };
+
+    const contents = [
+      { text: `${systemInstructions[feature_type] || systemInstructions.safe_route}\nUser command/query: ${prompt_text || 'Check path ahead for obstacles and guide me.'}` }
+    ];
+
+    if (image_base64) {
+      const mimeMatch = image_base64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,/);
+      const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+      const base64Data = image_base64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+      contents.push({
+        inlineData: { data: base64Data, mimeType }
+      });
+    }
+
+    const response = await generateWithGemini38(contents);
+    const rawText = response.text || '';
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    const parsed = jsonMatch
+      ? JSON.parse(jsonMatch[0])
+      : { en: rawText.trim() || 'Path scanned.', turn_direction: 'STRAIGHT', hazard: false };
+
+    const { data: savedLog } = await supabase
+      .from('ai_history')
+      .insert([{
+        user_id: req.user.id,
+        feature_type,
+        user_prompt: destination ? `Route to: ${destination}` : (prompt_text || 'Live Obstacle Scan'),
+        ai_response_en: parsed.en,
+        ai_response_kn: parsed.en,
+        location_info: location_info || ''
+      }])
+      .select()
+      .single();
+
+    res.json({ result: parsed, savedLog });
+  } catch (err) {
+    console.error('Gemini 3.8 Error:', err);
+    const isQuota = err.status === 429 || (err.message || '').includes('429');
+    res.status(isQuota ? 429 : 500).json({
+      error: isQuota
+        ? 'Daily Free Tier quota (20 requests) reached. Add a new API key from a new project in Render Environment.'
+        : 'AI processing failed: ' + err.message
+    });
+  }
+});
+
+// --- HISTORY RETRIEVAL ---
+app.get('/api/history', authMiddleware, async (req, res) => {
+  const { data, error } = await supabase
+    .from('ai_history')
+    .select('*')
+    .eq('user_id', req.user.id)
+    .order('created_at', { ascending: false })
+    .limit(30);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.get('/', (req, res) => res.send('ForYou AI Backend Running on Gemini 3.8 Flash!'));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`ForYou AI Server running on port ${PORT}`));
