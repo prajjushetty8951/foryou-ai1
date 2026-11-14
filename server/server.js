@@ -45,15 +45,15 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// --- GEMINI 3.8 FLASH HELPER (WITH AUTO-RETRY, NO DEPRECATED MODELS) ---
+// --- GEMINI 3.8 HELPER (FALLS BACK TO 3.8-FLASH-LITE IF DAILY QUOTA IS FULL) ---
 async function generateWithGemini38(contents) {
-  const maxAttempts = 2;
+  const models = ['gemini-3.8-flash', 'gemini-3.8-flash-lite'];
   let lastError;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (const modelName of models) {
     try {
       return await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: modelName,
         contents,
         config: {
           responseMimeType: 'application/json',
@@ -63,15 +63,14 @@ async function generateWithGemini38(contents) {
     } catch (err) {
       lastError = err;
       const msg = err.message || '';
-      const isTransient =
+      if (
         err.status === 429 ||
         err.status === 503 ||
+        err.status === 404 ||
         msg.includes('429') ||
         msg.includes('503') ||
-        msg.toLowerCase().includes('overloaded');
-
-      if (isTransient && attempt < maxAttempts) {
-        await new Promise((r) => setTimeout(r, 1500));
+        msg.includes('404')
+      ) {
         continue;
       }
       throw err;
@@ -230,7 +229,12 @@ Return strictly valid JSON: {"en": "Clear spoken currency amount or medicine det
     res.json({ result: parsed, savedLog });
   } catch (err) {
     console.error('Gemini 3.8 Error:', err);
-    res.status(500).json({ error: 'AI processing failed: ' + err.message });
+    const isQuota = err.status === 429 || (err.message || '').includes('429');
+    res.status(isQuota ? 429 : 500).json({
+      error: isQuota
+        ? 'Daily Free Tier quota (20 requests) reached. Add a fresh API key in Render or wait for quota reset.'
+        : 'AI processing failed: ' + err.message
+    });
   }
 });
 
@@ -246,7 +250,7 @@ app.get('/api/history', authMiddleware, async (req, res) => {
   res.json(data);
 });
 
-app.get('/', (req, res) => res.send('ForYou AI Backend Running on Gemini 3.8 Flash!'));
+app.get('/', (req, res) => res.send('ForYou AI Backend Running on Gemini 3.8!'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`ForYou AI Server running on port ${PORT}`));
