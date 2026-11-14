@@ -144,7 +144,7 @@ export default function App() {
     }
   };
 
-  // --- LAYER 1: 0ms WEB AUDIO SONAR BEEP SYNTHESIZER ---
+  // --- LAYER 1: 0ms TACTILE VIBRATION + SIMPLE SOFT SOUND ---
   const initAudioContext = () => {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -159,6 +159,18 @@ export default function App() {
   };
 
   const triggerSonarBeep = (intensity = 50) => {
+    // 1. Strong vibration when object comes close (always active even if sound is muted)
+    try {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        if (intensity > 60) {
+          navigator.vibrate([220, 80, 220]); // Strong double vibration when very close
+        } else {
+          navigator.vibrate(150); // Clear single vibration when object approaches
+        }
+      }
+    } catch {}
+
+    // 2. Simple, gentle soft beep sound
     if (!voiceEnabled) return;
     try {
       initAudioContext();
@@ -169,28 +181,29 @@ export default function App() {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
 
-      // Higher pitch & sharper alert when obstacle is closer
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(intensity > 65 ? 1150 : 880, now);
+      osc.frequency.setValueAtTime(intensity > 60 ? 640 : 520, now);
 
-      gain.gain.setValueAtTime(0.28, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.18, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
 
       osc.connect(gain);
       gain.connect(ctx.destination);
 
       osc.start(now);
-      osc.stop(now + 0.12);
-
-      if (navigator.vibrate) {
-        navigator.vibrate(intensity > 65 ? [90, 40, 90] : 60);
-      }
+      osc.stop(now + 0.15);
     } catch {}
   };
 
-  // Synchronously unlocks Android Chrome TTS + Sonar Audio on button tap
+  // Synchronously unlocks Android Chrome TTS + Vibration + Sonar Audio on button tap
   const unlockSpeech = (initialMsg) => {
     initAudioContext();
+    try {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate(40);
+      }
+    } catch {}
     if (!('speechSynthesis' in window)) return;
     try {
       window.speechSynthesis.resume();
@@ -306,7 +319,7 @@ export default function App() {
         walkStartedAtRef.current = Date.now();
         setIsWalkingActive(true);
         isWalkingRef.current = true;
-        speakWithResume(`Hybrid 0 millisecond sonar and Gemini 3.8 guidance active toward ${target}.`);
+        speakWithResume(`Hybrid proximity vibration and Gemini 3.8 guidance active toward ${target}.`);
         runAIRef.current?.('safe_route', `Guide me safely toward: ${target}. Warn me immediately if any object blocks my path and tell me which side to step.`, target);
       } else {
         speakWithResume('Please allow camera permission first to start live guidance.');
@@ -662,7 +675,7 @@ export default function App() {
     } catch (err) {
       const errMsg = err.response?.data?.error || err.message || 'AI Analysis failed';
       setScanError(errMsg);
-      setLayer2Status('Quota Limit / Standby (0ms Beep Still Active)');
+      setLayer2Status('Quota Limit / Standby (Vibration & Beep Active)');
       if (!isWalkingRef.current) {
         alert(errMsg);
       }
@@ -678,7 +691,7 @@ export default function App() {
     const target = customDest || destination || 'Safe Clear Path';
     if (!destination && customDest) setDestination(customDest);
 
-    unlockSpeech(`0 millisecond proximity sonar and Gemini guide active toward ${target}.`);
+    unlockSpeech(`0 millisecond proximity vibration and Gemini guide active toward ${target}.`);
     setScanError('');
     prevFrameDataRef.current = null;
     walkStartedAtRef.current = Date.now();
@@ -708,7 +721,7 @@ export default function App() {
     unlockSpeech('Hybrid obstacle and route guidance paused.');
   };
 
-  // --- 2-LAYER HYBRID LOOP: 100ms (0ms Latency) Local Proximity Sensor + Smart Gemini Trigger ---
+  // --- 2-LAYER HYBRID LOOP: 100ms Local Proximity Sensor + Smart Gemini Trigger ---
   useEffect(() => {
     if (!isWalkingActive) return;
 
@@ -750,7 +763,6 @@ export default function App() {
         }
 
         const avgDelta = centerDelta / centerCount;
-        // Convert pixel shift into 0–100% proximity/obstacle score
         const score = Math.min(100, Math.round(avgDelta * 2.4));
         setProximityScore(score);
 
@@ -760,8 +772,8 @@ export default function App() {
         if (warmedUp && score >= 36) {
           setEdgeAlertActive(true);
 
-          // Layer 1: Immediate 0ms Car-Reverse Sonar Beep (faster beep as object gets closer)
-          const beepGapMs = score > 68 ? 220 : 420;
+          // Layer 1: Immediate 0ms Vibration + Simple Soft Beep when object approaches
+          const beepGapMs = score > 60 ? 480 : 680;
           if (now - lastBeepTimeRef.current > beepGapMs) {
             lastBeepTimeRef.current = now;
             triggerSonarBeep(score);
@@ -777,7 +789,6 @@ export default function App() {
           }
         } else {
           setEdgeAlertActive(false);
-          // Count unnecessary cloud API calls saved every 3 seconds when path is stable
           frameTick++;
           if (frameTick % 30 === 0) {
             setApiCallsSaved((prevCount) => prevCount + 1);
@@ -786,7 +797,7 @@ export default function App() {
       }
 
       prevFrameDataRef.current = new Uint8ClampedArray(frame);
-    }, 100); // Runs 10 times per second locally in <1ms with ZERO API calls
+    }, 100);
 
     return () => clearInterval(sensorInterval);
   }, [isWalkingActive, destination, voiceEnabled]);
@@ -1069,7 +1080,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <MapPin className="w-4 h-4 text-amber-400" />
                 <span className="text-xs uppercase tracking-[0.18em] text-amber-300 font-bold">
-                  0ms Edge Proximity Beep + Gemini 3.8 Obstacle Guide
+                  0ms Proximity Vibration & Beep + Gemini 3.8 Guide
                 </span>
               </div>
               {destination && (
@@ -1137,10 +1148,10 @@ export default function App() {
                 >
                   <div className="flex items-center justify-between text-xs mb-2">
                     <span className="font-bold uppercase tracking-wider flex items-center gap-1.5 text-amber-300">
-                      <Activity className="w-3.5 h-3.5" /> Layer 1: 0ms Edge Proximity Reflex
+                      <Activity className="w-3.5 h-3.5" /> Layer 1: 0ms Proximity Vibration & Beep
                     </span>
                     <span className={`font-extrabold ${edgeAlertActive ? 'text-rose-400' : 'text-emerald-400'}`}>
-                      {edgeAlertActive ? `BEEP ALERT (${proximityScore}%)` : `CLEAR (${proximityScore}%)`}
+                      {edgeAlertActive ? `VIBRATE + BEEP (${proximityScore}%)` : `CLEAR (${proximityScore}%)`}
                     </span>
                   </div>
                   <div className="w-full h-2 bg-black/60 rounded-full overflow-hidden">
@@ -1393,7 +1404,7 @@ export default function App() {
                   </p>
                   <p className="text-xs text-zinc-500 mt-1 max-w-sm leading-relaxed">
                     {activeTab === 'safe_route'
-                      ? 'Layer 1 gives instant 0ms sonar beeps when an object approaches, and Layer 2 triggers Gemini 3.8 only when needed to guide you left or right.'
+                      ? 'Layer 1 gives instant 0ms vibration & simple soft beeps when an object approaches, and Layer 2 triggers Gemini 3.8 only when needed to guide you left or right.'
                       : 'Point your camera at currency notes, medicine labels, or documents and select Capture & Analyze.'}
                   </p>
                 </div>
