@@ -30,6 +30,7 @@ export default function App() {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [promptText, setPromptText] = useState('');
   const [aiResult, setAiResult] = useState(null);
+  const [scanError, setScanError] = useState('');
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [gestures, setGestures] = useState([]);
@@ -55,6 +56,8 @@ export default function App() {
   const fileInputRef = useRef(null);
   const runAIRef = useRef(null);
   const isWalkingRef = useRef(false);
+  const isScanningRef = useRef(false);
+  const speechStartTimeRef = useRef(0);
 
   const voiceCommActiveRef = useRef(false);
   const isSpeakingRef = useRef(false);
@@ -128,18 +131,57 @@ export default function App() {
     }
   };
 
+  // Synchronously unlocks Android Chrome TTS audio inside user tap handler
+  const unlockSpeech = (initialMsg) => {
+    if (!('speechSynthesis' in window)) return;
+    try {
+      window.speechSynthesis.resume();
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+      }
+      const u = new SpeechSynthesisUtterance(initialMsg);
+      u.lang = 'en-US';
+      u.rate = 1.05;
+      speechStartTimeRef.current = Date.now();
+      u.onend = () => { speechStartTimeRef.current = 0; };
+      u.onerror = () => { speechStartTimeRef.current = 0; };
+      window.speechSynthesis.speak(u);
+    } catch {}
+  };
+
   const speakText = (textEn, force = false) => {
     if ((!voiceEnabled && !force) || !('speechSynthesis' in window) || !textEn) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(textEn);
-    utterance.lang = 'en-US';
-    utterance.rate = 1.02;
-    window.speechSynthesis.speak(utterance);
+    try {
+      window.speechSynthesis.resume();
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+      }
+      setTimeout(() => {
+        const utterance = new SpeechSynthesisUtterance(textEn);
+        utterance.lang = 'en-US';
+        utterance.rate = 1.02;
+        utterance.onstart = () => {
+          speechStartTimeRef.current = Date.now();
+        };
+        utterance.onend = () => {
+          speechStartTimeRef.current = 0;
+        };
+        utterance.onerror = () => {
+          speechStartTimeRef.current = 0;
+        };
+        window.speechSynthesis.speak(utterance);
+      }, 60);
+    } catch {}
   };
 
   const speakWithResume = (textEn, resumeAfter = true) => {
     if (!('speechSynthesis' in window) || !textEn) return;
-    window.speechSynthesis.cancel();
+    try {
+      window.speechSynthesis.resume();
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+      }
+    } catch {}
     isSpeakingRef.current = true;
     setVoiceCommStatus('Speaking...');
 
@@ -147,27 +189,29 @@ export default function App() {
       try { recognitionRef.current.abort(); } catch {}
     }
 
-    const utterance = new SpeechSynthesisUtterance(textEn);
-    utterance.lang = 'en-US';
-    utterance.rate = 1.02;
+    setTimeout(() => {
+      const utterance = new SpeechSynthesisUtterance(textEn);
+      utterance.lang = 'en-US';
+      utterance.rate = 1.02;
 
-    utterance.onend = () => {
-      isSpeakingRef.current = false;
-      if (resumeAfter && voiceCommActiveRef.current) {
-        startVoiceCommListening();
-      } else if (!voiceCommActiveRef.current) {
-        setVoiceCommStatus('Tap Start Voice Assistant for hands-free voice control');
-      }
-    };
+      utterance.onend = () => {
+        isSpeakingRef.current = false;
+        if (resumeAfter && voiceCommActiveRef.current) {
+          startVoiceCommListening();
+        } else if (!voiceCommActiveRef.current) {
+          setVoiceCommStatus('Tap Start Voice Assistant for hands-free voice control');
+        }
+      };
 
-    utterance.onerror = () => {
-      isSpeakingRef.current = false;
-      if (resumeAfter && voiceCommActiveRef.current) {
-        setTimeout(() => startVoiceCommListening(), 500);
-      }
-    };
+      utterance.onerror = () => {
+        isSpeakingRef.current = false;
+        if (resumeAfter && voiceCommActiveRef.current) {
+          setTimeout(() => startVoiceCommListening(), 500);
+        }
+      };
 
-    window.speechSynthesis.speak(utterance);
+      window.speechSynthesis.speak(utterance);
+    }, 60);
   };
 
   const handleVoiceCommCommand = async (transcript) => {
@@ -275,6 +319,7 @@ export default function App() {
       });
 
       const result = res.data.result;
+      setScanError('');
       setAiResult(result);
       if (result.hazard && navigator.vibrate) {
         navigator.vibrate([300, 100, 300, 100, 450]);
@@ -283,6 +328,7 @@ export default function App() {
       speakWithResume(result.en || 'Scan complete.', true);
     } catch (err) {
       const msg = err.response?.data?.error || 'Could not reach the AI server right now.';
+      setScanError(msg);
       speakWithResume(msg, true);
     }
   };
@@ -370,7 +416,6 @@ export default function App() {
       const spokenDest = e.results[0][0].transcript;
       setDestination(spokenDest);
       setIsVoiceDestListening(false);
-      speakText(`Destination set to ${spokenDest}. Starting live obstacle guidance.`, true);
       startSafeWalk(spokenDest);
     };
     recognition.onerror = () => setIsVoiceDestListening(false);
@@ -415,6 +460,7 @@ export default function App() {
           videoRef.current.onloadedmetadata = () => resolve();
         });
         await videoRef.current.play();
+        await new Promise((r) => setTimeout(r, 250));
         setCameraOn(true);
         return true;
       }
@@ -440,7 +486,6 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
-  // Fast 640px frame capture so mobile 4G uploads complete in <0.5s
   const captureFrame = () => {
     if (uploadedImage) return uploadedImage;
     const video = videoRef.current;
@@ -483,7 +528,7 @@ export default function App() {
   };
 
   const runAI = async (overrideFeature = null, overridePrompt = null, overrideDest = null) => {
-    if (loading) return;
+    if (isScanningRef.current) return;
     const feature_type = overrideFeature || activeTab;
     const finalPrompt = overridePrompt !== null ? overridePrompt : promptText;
     const activeDest = overrideDest !== null ? overrideDest : destination;
@@ -494,6 +539,11 @@ export default function App() {
       return;
     }
 
+    if (!overrideFeature) {
+      unlockSpeech('Scanning...');
+    }
+
+    isScanningRef.current = true;
     setLoading(true);
     try {
       let location_info = gpsCoords
@@ -508,20 +558,25 @@ export default function App() {
               resolve();
             },
             () => resolve(),
-            { timeout: 2500 }
+            { timeout: 2000 }
           );
         });
       }
 
-      const res = await api.post('/api/ai/analyze', {
-        feature_type,
-        prompt_text: finalPrompt,
-        image_base64,
-        location_info,
-        destination: activeDest
-      });
+      const res = await api.post(
+        '/api/ai/analyze',
+        {
+          feature_type,
+          prompt_text: finalPrompt,
+          image_base64,
+          location_info,
+          destination: activeDest
+        },
+        { timeout: 20000 }
+      );
 
       const result = res.data.result;
+      setScanError('');
       setAiResult(result);
 
       if (result.turn_direction === 'ARRIVED') {
@@ -540,10 +595,15 @@ export default function App() {
       }
       fetchHistory();
     } catch (err) {
+      const errMsg = err.response?.data?.error || err.message || 'AI Analysis failed';
+      setScanError(errMsg);
       if (!isWalkingRef.current) {
-        alert(err.response?.data?.error || 'AI Analysis failed');
+        alert(errMsg);
+      } else {
+        speakText('Scan error. Retrying.');
       }
     } finally {
+      isScanningRef.current = false;
       setLoading(false);
     }
   };
@@ -553,8 +613,14 @@ export default function App() {
   const startSafeWalk = async (customDest = null) => {
     const target = customDest || destination || 'Safe Clear Path';
     if (!destination && customDest) setDestination(customDest);
+
+    // Unlock mobile browser audio immediately on button press
+    unlockSpeech(`Live obstacle guard active toward ${target}. Scanning path ahead.`);
+    setScanError('');
+
     const camReady = cameraOn || (await startCamera());
     if (!camReady && !uploadedImage) return;
+
     setIsWalkingActive(true);
     isWalkingRef.current = true;
     runAI(
@@ -567,15 +633,17 @@ export default function App() {
   const stopSafeWalk = () => {
     setIsWalkingActive(false);
     isWalkingRef.current = false;
-    window.speechSynthesis?.cancel();
-    speakText('Live obstacle and route guidance paused.', true);
+    unlockSpeech('Live obstacle and route guidance paused.');
   };
 
   // Continuous non-overlapping 3.5-second live camera obstacle & route scan
   useEffect(() => {
     if (!isWalkingActive) return;
     const interval = setInterval(() => {
-      if (loading || window.speechSynthesis?.speaking) return;
+      if (!isWalkingRef.current || isScanningRef.current) return;
+      const speakingForMs = speechStartTimeRef.current ? Date.now() - speechStartTimeRef.current : 0;
+      if (window.speechSynthesis?.speaking && speakingForMs < 5500) return;
+
       runAIRef.current?.(
         'safe_route',
         `Live walk check toward: ${destination || 'Safe Clear Path'}. If any object, person, vehicle, or obstacle blocks ahead, tell me immediately to move left or move right.`,
@@ -583,7 +651,7 @@ export default function App() {
       );
     }, 3500);
     return () => clearInterval(interval);
-  }, [isWalkingActive, destination, loading]);
+  }, [isWalkingActive, destination]);
 
   const handleSaveGesture = async (e) => {
     e.preventDefault();
@@ -831,6 +899,7 @@ export default function App() {
                 onClick={() => {
                   setActiveTab(t.id);
                   setAiResult(null);
+                  setScanError('');
                   if (t.id !== 'safe_route') {
                     setIsWalkingActive(false);
                     isWalkingRef.current = false;
@@ -1061,6 +1130,13 @@ export default function App() {
                 )}
               </div>
 
+              {scanError && (
+                <div className="mb-3 p-3.5 rounded-xl bg-rose-950/60 border border-rose-500/50 text-xs text-rose-200">
+                  <strong className="uppercase tracking-wider block mb-1 text-rose-400">Scanner Notice:</strong>
+                  {scanError}
+                </div>
+              )}
+
               {aiResult ? (
                 <div
                   className={`flex-1 p-6 rounded-2xl border flex flex-col justify-center space-y-4 ${
@@ -1109,7 +1185,9 @@ export default function App() {
                 <div className="flex-1 p-8 rounded-2xl bg-zinc-900/40 border border-dashed border-white/10 flex flex-col items-center justify-center text-center">
                   <Navigation className="w-7 h-7 text-amber-400/60 mb-3" />
                   <p className="text-sm text-zinc-300 font-medium">
-                    {activeTab === 'safe_route'
+                    {loading
+                      ? 'Analyzing Live Camera Frame...'
+                      : activeTab === 'safe_route'
                       ? 'Tap "Start Live Obstacle & Walk Guide"'
                       : 'Awaiting Visual or Text Input'}
                   </p>

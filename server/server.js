@@ -208,8 +208,11 @@ Return strictly valid JSON: {"en": "Clear spoken currency amount or medicine det
     }
 
     const response = await generateWithGemini38(contents);
-    const cleanText = response.text.replace(/```json\s*|```/g, '').trim();
-    const parsed = JSON.parse(cleanText);
+    const rawText = response.text || '';
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    const parsed = jsonMatch
+      ? JSON.parse(jsonMatch[0])
+      : { en: rawText.trim() || 'Path scanned.', turn_direction: 'STRAIGHT', hazard: false };
 
     const { data: savedLog } = await supabase
       .from('ai_history')
