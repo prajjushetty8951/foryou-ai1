@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import {
-  Eye, Ear, ShieldAlert, Volume2, VolumeX, Mic, Camera, History,
+  Eye, Ear, ShieldAlert, Volume2, VolumeX, Mic, MicOff, Camera, History,
   Plus, LogOut, Sparkles, Bookmark, FileText, Banknote, ArrowRight,
   CheckCircle2, AlertTriangle, Radio, Compass, Navigation, MapPin,
   ArrowUp, ArrowUpLeft, ArrowUpRight, OctagonAlert, Flag, Play, Square,
@@ -45,10 +45,29 @@ export default function App() {
   const [isVoiceDestListening, setIsVoiceDestListening] = useState(false);
   const [gpsCoords, setGpsCoords] = useState(null);
 
+  // Hands-Free Two-Way Voice Communicator State
+  const [voiceCommActive, setVoiceCommActive] = useState(false);
+  const [voiceCommStatus, setVoiceCommStatus] = useState('Tap Start Voice Assistant for hands-free voice control');
+  const [voiceCommHeard, setVoiceCommHeard] = useState('');
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const runAIRef = useRef(null);
+
+  const voiceCommActiveRef = useRef(false);
+  const isSpeakingRef = useRef(false);
+  const recognitionRef = useRef(null);
+  const latestStateRef = useRef({});
+
+  latestStateRef.current = {
+    activeTab,
+    cameraOn,
+    uploadedImage,
+    gpsCoords,
+    destination,
+    isWalkingActive
+  };
 
   const api = axios.create({
     baseURL: API_URL,
@@ -78,6 +97,16 @@ export default function App() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [token]);
 
+  useEffect(() => {
+    return () => {
+      voiceCommActiveRef.current = false;
+      window.speechSynthesis?.cancel();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch {}
+      }
+    };
+  }, []);
+
   const fetchHistory = async () => {
     try {
       const res = await api.get('/api/history');
@@ -103,6 +132,233 @@ export default function App() {
     utterance.lang = 'en-US';
     utterance.rate = 0.96;
     window.speechSynthesis.speak(utterance);
+  };
+
+  // Speak response and automatically resume listening if Voice Communicator is ON
+  const speakWithResume = (textEn, resumeAfter = true) => {
+    if (!('speechSynthesis' in window) || !textEn) return;
+    window.speechSynthesis.cancel();
+    isSpeakingRef.current = true;
+    setVoiceCommStatus('Speaking...');
+
+    if (recognitionRef.current) {
+      try { recognitionRef.current.abort(); } catch {}
+    }
+
+    const utterance = new SpeechSynthesisUtterance(textEn);
+    utterance.lang = 'en-US';
+    utterance.rate = 0.98;
+
+    utterance.onend = () => {
+      isSpeakingRef.current = false;
+      if (resumeAfter && voiceCommActiveRef.current) {
+        startVoiceCommListening();
+      } else if (!voiceCommActiveRef.current) {
+        setVoiceCommStatus('Tap Start Voice Assistant for hands-free voice control');
+      }
+    };
+
+    utterance.onerror = () => {
+      isSpeakingRef.current = false;
+      if (resumeAfter && voiceCommActiveRef.current) {
+        setTimeout(() => startVoiceCommListening(), 500);
+      }
+    };
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const handleVoiceCommCommand = async (transcript) => {
+    setVoiceCommHeard(transcript);
+    const cmd = transcript.toLowerCase().trim();
+    setVoiceCommStatus('Processing command...');
+
+    // 1. Turn off Voice Communicator
+    if (cmd.includes('stop voice') || cmd.includes('turn off voice') || cmd.includes('exit voice')) {
+      voiceCommActiveRef.current = false;
+      setVoiceCommActive(false);
+      speakWithResume('Voice communicator turned off.', false);
+      return;
+    }
+
+    // 2. Camera control
+    if (
+      cmd.includes('open camera') ||
+      cmd.includes('activate camera') ||
+      cmd.includes('start camera') ||
+      cmd.includes('turn on camera')
+    ) {
+      const ok = await startCamera();
+      speakWithResume(ok ? 'Camera lens activated. Say scan path or ask what is in front of you.' : 'Could not access camera.');
+      return;
+    }
+
+    // 3. Safe Walk control
+    if (cmd.includes('start safe walk') || cmd.includes('auto guide') || cmd.includes('guide me to')) {
+      const destMatch = cmd.split('guide me to')[1]?.trim();
+      const target = destMatch || latestStateRef.current.destination || 'Nearest Safe Footpath';
+      if (destMatch) setDestination(destMatch);
+      const camReady = latestStateRef.current.cameraOn || (await startCamera());
+      if (camReady || latestStateRef.current.uploadedImage) {
+        setActiveTab('safe_route');
+        setIsWalkingActive(true);
+        speakWithResume(`Starting safe walk guidance toward ${target}.`);
+        runAIRef.current?.('safe_route', `Guide me safely toward: ${target}`, target);
+      } else {
+        speakWithResume('Please allow camera permission first to start safe walk.');
+      }
+      return;
+    }
+
+    if (cmd.includes('stop safe walk') || cmd.includes('stop walk') || cmd.includes('stop guide')) {
+      setIsWalkingActive(false);
+      speakWithResume('Safe walk guidance stopped.');
+      return;
+    }
+
+    // 4. Emergency SOS
+    if (cmd.includes('emergency') || cmd.includes('sos') || cmd.includes('help me')) {
+      speakWithResume('Triggering Emergency SOS alert now.');
+      runAIRef.current?.('sos_alert', 'EMERGENCY SOS! Analyze immediate surroundings and broadcast safety alert.');
+      return;
+    }
+
+    // 5. Tab Switching by Voice
+    if (cmd.includes('safe route') || cmd.includes('navigation')) {
+      setActiveTab('safe_route');
+      setAiResult(null);
+      speakWithResume('Switched to Safe Route.');
+      return;
+    }
+    if (cmd.includes('spatial') || cmd.includes('obstacle') || cmd.includes('clock face')) {
+      setActiveTab('vision_nav');
+      setAiResult(null);
+      speakWithResume('Switched to Spatial Navigation.');
+      return;
+    }
+    if (cmd.includes('currency') || cmd.includes('money') || cmd.includes('medicine') || cmd.includes('tablet')) {
+      setActiveTab('currency_med');
+      setAiResult(null);
+      speakWithResume('Switched to Currency and Medicine reader.');
+      return;
+    }
+    if (cmd.includes('sign') || cmd.includes('bridge') || cmd.includes('caption')) {
+      setActiveTab('sign_bridge');
+      setAiResult(null);
+      speakWithResume('Switched to Sign and Flip Bridge.');
+      return;
+    }
+    if (cmd.includes('memory') || cmd.includes('vault') || cmd.includes('remember')) {
+      setActiveTab('memory_vault');
+      setAiResult(null);
+      speakWithResume('Switched to Memory Vault.');
+      return;
+    }
+    if (cmd.includes('form') || cmd.includes('document') || cmd.includes('read text')) {
+      setActiveTab('form_reader');
+      setAiResult(null);
+      speakWithResume('Switched to Form Reader.');
+      return;
+    }
+
+    // 6. Natural Question or "Scan path" -> Uses live camera + GPS + AI
+    try {
+      setVoiceCommStatus('Asking ForYou AI...');
+      const image_base64 = captureFrame();
+      const gps = latestStateRef.current.gpsCoords;
+      const location_info = gps ? `Lat: ${gps.lat}, Lng: ${gps.lng} (±${gps.accuracy}m)` : '';
+
+      const res = await api.post('/api/ai/analyze', {
+        feature_type: latestStateRef.current.activeTab,
+        prompt_text: transcript,
+        image_base64,
+        location_info,
+        destination: latestStateRef.current.destination
+      });
+
+      const result = res.data.result;
+      setAiResult(result);
+      if (result.hazard && navigator.vibrate) {
+        navigator.vibrate([300, 100, 300, 100, 450]);
+      }
+      fetchHistory();
+      speakWithResume(result.en || 'Scan complete.', true);
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Could not reach the AI server right now.';
+      speakWithResume(msg, true);
+    }
+  };
+
+  const startVoiceCommListening = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceCommStatus('Voice recognition requires Chrome or Brave browser.');
+      return;
+    }
+
+    if (recognitionRef.current) {
+      try { recognitionRef.current.abort(); } catch {}
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.continuous = false;
+
+    recognition.onstart = () => {
+      setVoiceCommStatus('Listening... Speak a command or question');
+    };
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      handleVoiceCommCommand(transcript);
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === 'not-allowed') {
+        voiceCommActiveRef.current = false;
+        setVoiceCommActive(false);
+        setVoiceCommStatus('Microphone blocked. Allow mic permission in browser settings.');
+        return;
+      }
+      if (voiceCommActiveRef.current && !isSpeakingRef.current) {
+        setTimeout(() => startVoiceCommListening(), 700);
+      }
+    };
+
+    recognition.onend = () => {
+      if (voiceCommActiveRef.current && !isSpeakingRef.current) {
+        setTimeout(() => {
+          if (voiceCommActiveRef.current && !isSpeakingRef.current) {
+            startVoiceCommListening();
+          }
+        }, 400);
+      }
+    };
+
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch {}
+  };
+
+  const toggleVoiceCommunicator = () => {
+    if (!voiceCommActive) {
+      voiceCommActiveRef.current = true;
+      setVoiceCommActive(true);
+      speakWithResume(
+        'Voice communicator is active. Say open camera, scan path, start safe walk, or ask me what is in front of you.',
+        true
+      );
+    } else {
+      voiceCommActiveRef.current = false;
+      setVoiceCommActive(false);
+      window.speechSynthesis?.cancel();
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort(); } catch {}
+      }
+      setVoiceCommStatus('Tap Start Voice Assistant for hands-free voice control');
+    }
   };
 
   const listenForDestination = () => {
@@ -169,7 +425,7 @@ export default function App() {
       alert(
         'Camera blocked (' +
           err.name +
-          '). Click the icon next to localhost:5173 in your address bar, set Camera to Allow, and reload.'
+          '). Click the lock/site icon in your address bar, set Camera to Allow, and reload.'
       );
       return false;
     }
@@ -214,6 +470,9 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    voiceCommActiveRef.current = false;
+    setVoiceCommActive(false);
+    window.speechSynthesis?.cancel();
     localStorage.removeItem('foryou_token');
     localStorage.removeItem('foryou_user');
     setToken('');
@@ -270,7 +529,11 @@ export default function App() {
         navigator.vibrate([300, 100, 300, 100, 450]);
       }
 
-      speakText(result.en);
+      if (voiceCommActiveRef.current) {
+        speakWithResume(result.en, true);
+      } else {
+        speakText(result.en);
+      }
       fetchHistory();
     } catch (err) {
       if (!isWalkingActive) alert(err.response?.data?.error || 'AI Analysis failed');
@@ -478,6 +741,55 @@ export default function App() {
       </header>
 
       <main className="max-w-6xl mx-auto px-5 pt-8 space-y-8">
+        {/* Hands-Free Two-Way Voice Communicator Bar */}
+        <div
+          className={`glass-panel rounded-3xl p-5 border transition-all ${
+            voiceCommActive
+              ? 'border-amber-400/60 bg-gradient-to-r from-amber-500/15 via-zinc-900/90 to-zinc-900/90 shadow-lg shadow-amber-500/10'
+              : 'border-white/10'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    voiceCommActive ? 'bg-amber-400 animate-ping' : 'bg-zinc-500'
+                  }`}
+                />
+                <span className="text-xs uppercase tracking-[0.2em] text-amber-400 font-bold">
+                  Hands-Free Voice Communicator
+                </span>
+              </div>
+              <p className="text-sm text-zinc-200 font-medium">{voiceCommStatus}</p>
+              {voiceCommHeard && (
+                <p className="text-xs text-zinc-400">
+                  Last heard: <span className="text-amber-200 font-medium">"{voiceCommHeard}"</span>
+                </p>
+              )}
+            </div>
+
+            <button
+              onClick={toggleVoiceCommunicator}
+              className={`px-5 py-3.5 rounded-2xl font-extrabold text-xs uppercase tracking-wider flex items-center gap-2 transition cursor-pointer shadow-lg ${
+                voiceCommActive
+                  ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/25'
+                  : 'bg-gradient-to-r from-amber-400 to-amber-500 hover:brightness-110 text-zinc-950 shadow-amber-500/20'
+              }`}
+            >
+              {voiceCommActive ? (
+                <>
+                  <MicOff className="w-4 h-4" /> Stop Voice Assistant
+                </>
+              ) : (
+                <>
+                  <Mic className="w-4 h-4" /> Start Voice Assistant
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-amber-400 font-semibold mb-1">
