@@ -39,7 +39,7 @@ export default function App() {
   const [cameraOn, setCameraOn] = useState(false);
   const [uploadedImage, setUploadedImage] = useState(null);
 
-  // Outdoor Safe-Route State
+  // Outdoor Safe-Route & Live Obstacle Guard State
   const [destination, setDestination] = useState('');
   const [isWalkingActive, setIsWalkingActive] = useState(false);
   const [isVoiceDestListening, setIsVoiceDestListening] = useState(false);
@@ -54,12 +54,14 @@ export default function App() {
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const runAIRef = useRef(null);
+  const isWalkingRef = useRef(false);
 
   const voiceCommActiveRef = useRef(false);
   const isSpeakingRef = useRef(false);
   const recognitionRef = useRef(null);
   const latestStateRef = useRef({});
 
+  isWalkingRef.current = isWalkingActive;
   latestStateRef.current = {
     activeTab,
     cameraOn,
@@ -100,6 +102,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       voiceCommActiveRef.current = false;
+      isWalkingRef.current = false;
       window.speechSynthesis?.cancel();
       if (recognitionRef.current) {
         try { recognitionRef.current.abort(); } catch {}
@@ -130,11 +133,10 @@ export default function App() {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(textEn);
     utterance.lang = 'en-US';
-    utterance.rate = 0.96;
+    utterance.rate = 1.02;
     window.speechSynthesis.speak(utterance);
   };
 
-  // Speak response and automatically resume listening if Voice Communicator is ON
   const speakWithResume = (textEn, resumeAfter = true) => {
     if (!('speechSynthesis' in window) || !textEn) return;
     window.speechSynthesis.cancel();
@@ -147,7 +149,7 @@ export default function App() {
 
     const utterance = new SpeechSynthesisUtterance(textEn);
     utterance.lang = 'en-US';
-    utterance.rate = 0.98;
+    utterance.rate = 1.02;
 
     utterance.onend = () => {
       isSpeakingRef.current = false;
@@ -173,7 +175,6 @@ export default function App() {
     const cmd = transcript.toLowerCase().trim();
     setVoiceCommStatus('Processing command...');
 
-    // 1. Turn off Voice Communicator
     if (cmd.includes('stop voice') || cmd.includes('turn off voice') || cmd.includes('exit voice')) {
       voiceCommActiveRef.current = false;
       setVoiceCommActive(false);
@@ -181,7 +182,6 @@ export default function App() {
       return;
     }
 
-    // 2. Camera control
     if (
       cmd.includes('open camera') ||
       cmd.includes('activate camera') ||
@@ -189,41 +189,40 @@ export default function App() {
       cmd.includes('turn on camera')
     ) {
       const ok = await startCamera();
-      speakWithResume(ok ? 'Camera lens activated. Say scan path or ask what is in front of you.' : 'Could not access camera.');
+      speakWithResume(ok ? 'Camera lens activated. Say start safe walk or ask what is in front of you.' : 'Could not access camera.');
       return;
     }
 
-    // 3. Safe Walk control
-    if (cmd.includes('start safe walk') || cmd.includes('auto guide') || cmd.includes('guide me to')) {
+    if (cmd.includes('start safe walk') || cmd.includes('start live') || cmd.includes('auto guide') || cmd.includes('guide me to')) {
       const destMatch = cmd.split('guide me to')[1]?.trim();
-      const target = destMatch || latestStateRef.current.destination || 'Nearest Safe Footpath';
+      const target = destMatch || latestStateRef.current.destination || 'Safe Clear Path';
       if (destMatch) setDestination(destMatch);
       const camReady = latestStateRef.current.cameraOn || (await startCamera());
       if (camReady || latestStateRef.current.uploadedImage) {
         setActiveTab('safe_route');
         setIsWalkingActive(true);
-        speakWithResume(`Starting safe walk guidance toward ${target}.`);
-        runAIRef.current?.('safe_route', `Guide me safely toward: ${target}`, target);
+        isWalkingRef.current = true;
+        speakWithResume(`Starting live obstacle and route guidance toward ${target}.`);
+        runAIRef.current?.('safe_route', `Guide me safely toward: ${target}. Warn me immediately if any object blocks my path and tell me which side to step.`, target);
       } else {
-        speakWithResume('Please allow camera permission first to start safe walk.');
+        speakWithResume('Please allow camera permission first to start live guidance.');
       }
       return;
     }
 
     if (cmd.includes('stop safe walk') || cmd.includes('stop walk') || cmd.includes('stop guide')) {
       setIsWalkingActive(false);
+      isWalkingRef.current = false;
       speakWithResume('Safe walk guidance stopped.');
       return;
     }
 
-    // 4. Emergency SOS
     if (cmd.includes('emergency') || cmd.includes('sos') || cmd.includes('help me')) {
       speakWithResume('Triggering Emergency SOS alert now.');
       runAIRef.current?.('sos_alert', 'EMERGENCY SOS! Analyze immediate surroundings and broadcast safety alert.');
       return;
     }
 
-    // 5. Tab Switching by Voice
     if (cmd.includes('safe route') || cmd.includes('navigation')) {
       setActiveTab('safe_route');
       setAiResult(null);
@@ -261,9 +260,8 @@ export default function App() {
       return;
     }
 
-    // 6. Natural Question or "Scan path" -> Uses live camera + GPS + AI
     try {
-      setVoiceCommStatus('Asking ForYou AI...');
+      setVoiceCommStatus('Scanning with Gemini 3.8...');
       const image_base64 = captureFrame();
       const gps = latestStateRef.current.gpsCoords;
       const location_info = gps ? `Lat: ${gps.lat}, Lng: ${gps.lng} (±${gps.accuracy}m)` : '';
@@ -347,7 +345,7 @@ export default function App() {
       voiceCommActiveRef.current = true;
       setVoiceCommActive(true);
       speakWithResume(
-        'Voice communicator is active. Say open camera, scan path, start safe walk, or ask me what is in front of you.',
+        'Voice communicator is active. Say open camera, start safe walk, or ask what is in front of you.',
         true
       );
     } else {
@@ -372,7 +370,7 @@ export default function App() {
       const spokenDest = e.results[0][0].transcript;
       setDestination(spokenDest);
       setIsVoiceDestListening(false);
-      speakText(`Destination set to ${spokenDest}. Starting camera guidance.`, true);
+      speakText(`Destination set to ${spokenDest}. Starting live obstacle guidance.`, true);
       startSafeWalk(spokenDest);
     };
     recognition.onerror = () => setIsVoiceDestListening(false);
@@ -442,6 +440,7 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  // Fast 640px frame capture so mobile 4G uploads complete in <0.5s
   const captureFrame = () => {
     if (uploadedImage) return uploadedImage;
     const video = videoRef.current;
@@ -449,10 +448,12 @@ export default function App() {
     if (!video || !canvas || !video.srcObject || video.readyState < 2 || video.videoWidth === 0) {
       return null;
     }
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const maxWidth = 640;
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.85);
+    return canvas.toDataURL('image/jpeg', 0.72);
   };
 
   const handleAuth = async (e) => {
@@ -471,7 +472,9 @@ export default function App() {
 
   const handleLogout = () => {
     voiceCommActiveRef.current = false;
+    isWalkingRef.current = false;
     setVoiceCommActive(false);
+    setIsWalkingActive(false);
     window.speechSynthesis?.cancel();
     localStorage.removeItem('foryou_token');
     localStorage.removeItem('foryou_user');
@@ -505,7 +508,7 @@ export default function App() {
               resolve();
             },
             () => resolve(),
-            { timeout: 3000 }
+            { timeout: 2500 }
           );
         });
       }
@@ -523,6 +526,7 @@ export default function App() {
 
       if (result.turn_direction === 'ARRIVED') {
         setIsWalkingActive(false);
+        isWalkingRef.current = false;
       }
 
       if (result.hazard && navigator.vibrate) {
@@ -536,7 +540,9 @@ export default function App() {
       }
       fetchHistory();
     } catch (err) {
-      if (!isWalkingActive) alert(err.response?.data?.error || 'AI Analysis failed');
+      if (!isWalkingRef.current) {
+        alert(err.response?.data?.error || 'AI Analysis failed');
+      }
     } finally {
       setLoading(false);
     }
@@ -545,31 +551,39 @@ export default function App() {
   runAIRef.current = runAI;
 
   const startSafeWalk = async (customDest = null) => {
-    const target = customDest || destination || 'Nearest Safe Footpath';
+    const target = customDest || destination || 'Safe Clear Path';
     if (!destination && customDest) setDestination(customDest);
     const camReady = cameraOn || (await startCamera());
     if (!camReady && !uploadedImage) return;
     setIsWalkingActive(true);
-    runAI('safe_route', `Guide me safely toward: ${target}`, target);
+    isWalkingRef.current = true;
+    runAI(
+      'safe_route',
+      `Guide me safely toward: ${target}. Detect any objects or obstacles in front of the camera and tell me whether to move left, move right, stop, or walk straight.`,
+      target
+    );
   };
 
   const stopSafeWalk = () => {
     setIsWalkingActive(false);
+    isWalkingRef.current = false;
     window.speechSynthesis?.cancel();
-    speakText('Safe route guidance paused.', true);
+    speakText('Live obstacle and route guidance paused.', true);
   };
 
+  // Continuous non-overlapping 3.5-second live camera obstacle & route scan
   useEffect(() => {
     if (!isWalkingActive) return;
     const interval = setInterval(() => {
+      if (loading || window.speechSynthesis?.speaking) return;
       runAIRef.current?.(
         'safe_route',
-        `Continue guiding me safely to: ${destination || 'Nearest Safe Footpath'}. Check path ahead for obstacles, crossings, and landmarks.`,
+        `Live walk check toward: ${destination || 'Safe Clear Path'}. If any object, person, vehicle, or obstacle blocks ahead, tell me immediately to move left or move right.`,
         destination
       );
-    }, 6000);
+    }, 3500);
     return () => clearInterval(interval);
-  }, [isWalkingActive, destination]);
+  }, [isWalkingActive, destination, loading]);
 
   const handleSaveGesture = async (e) => {
     e.preventDefault();
@@ -668,7 +682,7 @@ export default function App() {
   }
 
   const tabs = [
-    { id: 'safe_route', label: 'Safe Route', desc: 'Outdoor destination & live path guide', icon: Navigation },
+    { id: 'safe_route', label: 'Safe Route', desc: 'Live obstacle avoidance & path guide', icon: Navigation },
     { id: 'vision_nav', label: 'Spatial Nav', desc: 'Clock-face obstacle & transit guidance', icon: Compass },
     { id: 'currency_med', label: 'Currency & Meds', desc: 'Notes, dosage & allergy verification', icon: Banknote },
     { id: 'sign_bridge', label: 'Sign & Flip Bridge', desc: 'Two-way gesture & caption communicator', icon: Ear },
@@ -803,7 +817,7 @@ export default function App() {
 
           <div className="flex items-center gap-2 text-xs text-zinc-400 bg-white/[0.03] border border-white/[0.07] px-3.5 py-2 rounded-full">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            {gpsCoords ? `GPS Locked (${gpsCoords.lat}, ${gpsCoords.lng})` : 'Neural Vision & Audio Engine Ready'}
+            {gpsCoords ? `GPS Locked (${gpsCoords.lat}, ${gpsCoords.lng})` : 'Gemini 3.8 Vision & Audio Ready'}
           </div>
         </div>
 
@@ -817,7 +831,10 @@ export default function App() {
                 onClick={() => {
                   setActiveTab(t.id);
                   setAiResult(null);
-                  if (t.id !== 'safe_route') setIsWalkingActive(false);
+                  if (t.id !== 'safe_route') {
+                    setIsWalkingActive(false);
+                    isWalkingRef.current = false;
+                  }
                 }}
                 className={`p-4 rounded-2xl border text-left transition-all cursor-pointer ${
                   isActive
@@ -845,7 +862,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <MapPin className="w-4 h-4 text-amber-400" />
                 <span className="text-xs uppercase tracking-[0.18em] text-amber-300 font-bold">
-                  Outdoor Destination & Live Safe-Path Command
+                  Live Obstacle Avoidance & Outdoor Destination Guide
                 </span>
               </div>
               {destination && (
@@ -864,7 +881,7 @@ export default function App() {
               <div className="flex-1 flex gap-2">
                 <input
                   type="text"
-                  placeholder="Where do you want to go? (e.g., Nearest Bus Stop, Pharmacy, Main Road)"
+                  placeholder="Destination (optional) — or just tap Start Safe Walk to avoid obstacles live"
                   className="flex-1 px-4 py-3.5 rounded-xl bg-zinc-900/90 border border-white/10 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/60"
                   value={destination}
                   onChange={(e) => setDestination(e.target.value)}
@@ -889,14 +906,14 @@ export default function App() {
                   onClick={() => startSafeWalk()}
                   className="px-6 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer"
                 >
-                  <Play className="w-4 h-4 fill-current" /> Start Safe Walk (Auto-Guide)
+                  <Play className="w-4 h-4 fill-current" /> Start Live Obstacle & Walk Guide
                 </button>
               ) : (
                 <button
                   onClick={stopSafeWalk}
                   className="px-6 py-3.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 animate-pulse cursor-pointer"
                 >
-                  <Square className="w-4 h-4 fill-current" /> Stop Walk Guide
+                  <Square className="w-4 h-4 fill-current" /> Stop Live Guide
                 </button>
               )}
             </div>
@@ -938,7 +955,7 @@ export default function App() {
                 <div className="absolute top-3 left-3 right-3 flex items-center justify-between">
                   <div className="px-2.5 py-1 rounded-full bg-black/65 backdrop-blur-md border border-white/10 flex items-center gap-1.5 text-[11px] font-medium text-emerald-300">
                     <Radio className="w-3 h-3 animate-pulse" />
-                    {uploadedImage ? 'Uploaded Photo Ready' : isWalkingActive ? 'Auto-Guiding Every 6s' : 'Live Optical Feed'}
+                    {uploadedImage ? 'Uploaded Photo Ready' : isWalkingActive ? 'Live Obstacle Guard Active' : 'Live Optical Feed'}
                   </div>
                   <div className="flex gap-1.5">
                     {uploadedImage && (
@@ -996,10 +1013,10 @@ export default function App() {
                 type="text"
                 placeholder={
                   activeTab === 'safe_route'
-                    ? 'Ask route question (e.g., "Is there a crosswalk ahead?" or "Read the street board")...'
+                    ? 'Ask route question (e.g., "Is there any obstacle ahead?" or "Which side is clear?")...'
                     : activeTab === 'memory_vault'
                     ? 'Ask or save: "Remember my keys on the wooden desk"'
-                    : 'Optional context (e.g., "Identify this object" or "Check expiry date")...'
+                    : 'Optional context (e.g., "Identify this currency note" or "Check medicine expiry")...'
                 }
                 className="w-full px-4 py-3.5 rounded-xl bg-zinc-900/90 border border-white/10 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/60 transition"
                 value={promptText}
@@ -1032,7 +1049,7 @@ export default function App() {
             <div className="flex-1 flex flex-col">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-xs uppercase tracking-[0.18em] text-zinc-400 font-semibold">
-                  {activeTab === 'safe_route' ? 'Live Safe-Route Voice Guidance' : 'AI Sensory Readout'}
+                  {activeTab === 'safe_route' ? 'Live Obstacle & Route Voice Guidance' : 'AI Sensory Readout'}
                 </span>
                 {aiResult && (
                   <button
@@ -1052,7 +1069,7 @@ export default function App() {
                       : 'bg-zinc-900/70 border-white/10'
                   }`}
                 >
-                  {activeTab === 'safe_route' && (
+                  {(activeTab === 'safe_route' || aiResult.turn_direction) && (
                     <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-black/40 border border-white/10">
                       <div className="w-12 h-12 rounded-xl bg-white/[0.06] flex items-center justify-center shrink-0">
                         {renderDirectionIcon(aiResult.turn_direction)}
@@ -1062,7 +1079,11 @@ export default function App() {
                           Recommended Action
                         </p>
                         <p className="text-lg font-extrabold text-white tracking-wide">
-                          {aiResult.turn_direction || 'PROCEED CAREFULLY'}
+                          {aiResult.turn_direction === 'LEFT'
+                            ? 'MOVE LEFT (SIDE-STEP)'
+                            : aiResult.turn_direction === 'RIGHT'
+                            ? 'MOVE RIGHT (SIDE-STEP)'
+                            : aiResult.turn_direction || 'PROCEED CAREFULLY'}
                         </p>
                       </div>
                     </div>
@@ -1071,7 +1092,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     {aiResult.hazard ? (
                       <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-rose-400 bg-rose-500/15 px-2.5 py-1 rounded-full">
-                        <AlertTriangle className="w-3.5 h-3.5" /> Obstacle / Traffic Caution
+                        <AlertTriangle className="w-3.5 h-3.5" /> Object Blocking — Move Side
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-full">
@@ -1089,13 +1110,13 @@ export default function App() {
                   <Navigation className="w-7 h-7 text-amber-400/60 mb-3" />
                   <p className="text-sm text-zinc-300 font-medium">
                     {activeTab === 'safe_route'
-                      ? 'Speak or Choose a Destination Above'
+                      ? 'Tap "Start Live Obstacle & Walk Guide"'
                       : 'Awaiting Visual or Text Input'}
                   </p>
                   <p className="text-xs text-zinc-500 mt-1 max-w-sm leading-relaxed">
                     {activeTab === 'safe_route'
-                      ? 'Tap "Speak Place" or "Start Safe Walk" to continuously scan sidewalks, crosswalks, signs, and obstacles as you move.'
-                      : 'Point your camera at pathways, currency notes, medicine labels, or documents and select Capture & Analyze.'}
+                      ? 'The AI watches your live camera continuously and tells you immediately when an object blocks your path and which side to step.'
+                      : 'Point your camera at currency notes, medicine labels, or documents and select Capture & Analyze.'}
                   </p>
                 </div>
               )}
