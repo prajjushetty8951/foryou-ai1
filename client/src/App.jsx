@@ -1,0 +1,904 @@
+import React, { useState, useEffect, useRef } from 'react';
+import axios from 'axios';
+import {
+  Eye, Ear, ShieldAlert, Volume2, VolumeX, Mic, Camera, History,
+  Plus, LogOut, Sparkles, Bookmark, FileText, Banknote, ArrowRight,
+  CheckCircle2, AlertTriangle, Radio, Compass, Navigation, MapPin,
+  ArrowUp, ArrowUpLeft, ArrowUpRight, OctagonAlert, Flag, Play, Square,
+  ExternalLink, Upload
+} from 'lucide-react';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
+const QUICK_DESTINATIONS = [
+  'Nearest Bus Stop',
+  'Nearest Pharmacy / Medical Shop',
+  'Safe Crosswalk / Main Road',
+  'Building Exit / Entrance',
+  'Nearest Metro / Auto Stand'
+];
+
+export default function App() {
+  const [token, setToken] = useState(localStorage.getItem('foryou_token') || '');
+  const [user, setUser] = useState(JSON.parse(localStorage.getItem('foryou_user') || 'null'));
+  const [isRegister, setIsRegister] = useState(false);
+  const [authForm, setAuthForm] = useState({
+    name: '', email: '', password: '', accessibility_mode: 'blind', allergies: '', emergency_contact: ''
+  });
+
+  const [activeTab, setActiveTab] = useState('safe_route');
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [promptText, setPromptText] = useState('');
+  const [aiResult, setAiResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [gestures, setGestures] = useState([]);
+  const [newGesture, setNewGesture] = useState({ gesture_name: '', spoken_phrase_en: '', category: 'Daily' });
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [uploadedImage, setUploadedImage] = useState(null);
+
+  // Outdoor Safe-Route State
+  const [destination, setDestination] = useState('');
+  const [isWalkingActive, setIsWalkingActive] = useState(false);
+  const [isVoiceDestListening, setIsVoiceDestListening] = useState(false);
+  const [gpsCoords, setGpsCoords] = useState(null);
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const runAIRef = useRef(null);
+
+  const api = axios.create({
+    baseURL: API_URL,
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  useEffect(() => {
+    if (token) {
+      fetchHistory();
+      fetchGestures();
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || !navigator.geolocation) return;
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        setGpsCoords({
+          lat: pos.coords.latitude.toFixed(5),
+          lng: pos.coords.longitude.toFixed(5),
+          accuracy: Math.round(pos.coords.accuracy)
+        });
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 5000 }
+    );
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [token]);
+
+  const fetchHistory = async () => {
+    try {
+      const res = await api.get('/api/history');
+      setHistory(res.data);
+    } catch (err) {
+      console.error('History fetch error', err);
+    }
+  };
+
+  const fetchGestures = async () => {
+    try {
+      const res = await api.get('/api/gestures');
+      setGestures(res.data);
+    } catch (err) {
+      console.error('Gestures fetch error', err);
+    }
+  };
+
+  const speakText = (textEn, force = false) => {
+    if ((!voiceEnabled && !force) || !('speechSynthesis' in window) || !textEn) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(textEn);
+    utterance.lang = 'en-US';
+    utterance.rate = 0.96;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const listenForDestination = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return alert('Voice recognition is supported in Google Chrome or Brave.');
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.onstart = () => setIsVoiceDestListening(true);
+    recognition.onresult = (e) => {
+      const spokenDest = e.results[0][0].transcript;
+      setDestination(spokenDest);
+      setIsVoiceDestListening(false);
+      speakText(`Destination set to ${spokenDest}. Starting camera guidance.`, true);
+      startSafeWalk(spokenDest);
+    };
+    recognition.onerror = () => setIsVoiceDestListening(false);
+    recognition.start();
+  };
+
+  const toggleListening = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return alert('Speech Recognition is supported in Google Chrome or Brave.');
+    if (isListening) {
+      setIsListening(false);
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.onstart = () => setIsListening(true);
+    recognition.onresult = (e) => {
+      setLiveTranscript(e.results[0][0].transcript);
+      setIsListening(false);
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.start();
+  };
+
+  const startCamera = async () => {
+    try {
+      setUploadedImage(null);
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await new Promise((resolve) => {
+          videoRef.current.onloadedmetadata = () => resolve();
+        });
+        await videoRef.current.play();
+        setCameraOn(true);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      alert(
+        'Camera blocked (' +
+          err.name +
+          '). Click the icon next to localhost:5173 in your address bar, set Camera to Allow, and reload.'
+      );
+      return false;
+    }
+  };
+
+  const handleImageUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setUploadedImage(reader.result);
+      setCameraOn(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const captureFrame = () => {
+    if (uploadedImage) return uploadedImage;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || !video.srcObject || video.readyState < 2 || video.videoWidth === 0) {
+      return null;
+    }
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  };
+
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    try {
+      const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
+      const res = await axios.post(`${API_URL}${endpoint}`, authForm);
+      localStorage.setItem('foryou_token', res.data.token);
+      localStorage.setItem('foryou_user', JSON.stringify(res.data.user));
+      setToken(res.data.token);
+      setUser(res.data.user);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Authentication failed');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('foryou_token');
+    localStorage.removeItem('foryou_user');
+    setToken('');
+    setUser(null);
+  };
+
+  const runAI = async (overrideFeature = null, overridePrompt = null, overrideDest = null) => {
+    if (loading) return;
+    const feature_type = overrideFeature || activeTab;
+    const finalPrompt = overridePrompt !== null ? overridePrompt : promptText;
+    const activeDest = overrideDest !== null ? overrideDest : destination;
+    const image_base64 = captureFrame();
+
+    if (!image_base64 && !finalPrompt) {
+      alert('No live camera video detected yet. Click "Activate Camera Lens" or "Upload Photo" first.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      let location_info = gpsCoords
+        ? `Lat: ${gpsCoords.lat}, Lng: ${gpsCoords.lng} (±${gpsCoords.accuracy}m)`
+        : '';
+
+      if (!location_info && (feature_type === 'sos_alert' || feature_type === 'safe_route') && navigator.geolocation) {
+        await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              location_info = `Lat: ${pos.coords.latitude.toFixed(5)}, Lng: ${pos.coords.longitude.toFixed(5)}`;
+              resolve();
+            },
+            () => resolve(),
+            { timeout: 3000 }
+          );
+        });
+      }
+
+      const res = await api.post('/api/ai/analyze', {
+        feature_type,
+        prompt_text: finalPrompt,
+        image_base64,
+        location_info,
+        destination: activeDest
+      });
+
+      const result = res.data.result;
+      setAiResult(result);
+
+      if (result.turn_direction === 'ARRIVED') {
+        setIsWalkingActive(false);
+      }
+
+      if (result.hazard && navigator.vibrate) {
+        navigator.vibrate([300, 100, 300, 100, 450]);
+      }
+
+      speakText(result.en);
+      fetchHistory();
+    } catch (err) {
+      if (!isWalkingActive) alert(err.response?.data?.error || 'AI Analysis failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  runAIRef.current = runAI;
+
+  const startSafeWalk = async (customDest = null) => {
+    const target = customDest || destination || 'Nearest Safe Footpath';
+    if (!destination && customDest) setDestination(customDest);
+    const camReady = cameraOn || (await startCamera());
+    if (!camReady && !uploadedImage) return;
+    setIsWalkingActive(true);
+    runAI('safe_route', `Guide me safely toward: ${target}`, target);
+  };
+
+  const stopSafeWalk = () => {
+    setIsWalkingActive(false);
+    window.speechSynthesis?.cancel();
+    speakText('Safe route guidance paused.', true);
+  };
+
+  useEffect(() => {
+    if (!isWalkingActive) return;
+    const interval = setInterval(() => {
+      runAIRef.current?.(
+        'safe_route',
+        `Continue guiding me safely to: ${destination || 'Nearest Safe Footpath'}. Check path ahead for obstacles, crossings, and landmarks.`,
+        destination
+      );
+    }, 6000);
+    return () => clearInterval(interval);
+  }, [isWalkingActive, destination]);
+
+  const handleSaveGesture = async (e) => {
+    e.preventDefault();
+    try {
+      await api.post('/api/gestures', {
+        ...newGesture,
+        spoken_phrase_kn: newGesture.spoken_phrase_en
+      });
+      setNewGesture({ gesture_name: '', spoken_phrase_en: '', category: 'Daily' });
+      fetchGestures();
+    } catch {
+      alert('Failed to save gesture');
+    }
+  };
+
+  if (!token) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6 relative overflow-hidden">
+        <div className="absolute w-[500px] h-[500px] bg-amber-500/10 rounded-full blur-[130px] -top-32 -left-32 pointer-events-none" />
+        <div className="absolute w-[400px] h-[400px] bg-indigo-500/10 rounded-full blur-[120px] bottom-0 right-0 pointer-events-none" />
+
+        <div className="max-w-md w-full glass-panel rounded-3xl p-8 relative z-10">
+          <div className="flex items-center gap-3.5 mb-8">
+            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shadow-lg shadow-amber-500/20">
+              <Sparkles className="w-6 h-6 text-zinc-950" />
+            </div>
+            <div>
+              <h1 className="font-serif-display text-3xl tracking-tight text-white">ForYou AI</h1>
+              <p className="text-xs uppercase tracking-[0.2em] text-amber-400/90 font-semibold">
+                Sensory Intelligence
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={handleAuth} className="space-y-4">
+            {isRegister && (
+              <>
+                <input
+                  type="text" placeholder="Full Name" required
+                  className="w-full px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/60"
+                  value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })}
+                />
+                <select
+                  className="w-full px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-white focus:outline-none focus:border-amber-500/60"
+                  value={authForm.accessibility_mode}
+                  onChange={(e) => setAuthForm({ ...authForm, accessibility_mode: e.target.value })}
+                >
+                  <option value="blind">Blind / Low Vision Navigation</option>
+                  <option value="deaf_mute">Deaf / Non-Verbal Bridge</option>
+                  <option value="general">Caregiver / General Assistance</option>
+                </select>
+                <div className="grid grid-cols-2 gap-3">
+                  <input
+                    type="text" placeholder="Medical Allergies"
+                    className="w-full px-3.5 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-white placeholder-zinc-500 text-sm"
+                    value={authForm.allergies} onChange={(e) => setAuthForm({ ...authForm, allergies: e.target.value })}
+                  />
+                  <input
+                    type="text" placeholder="Emergency Contact"
+                    className="w-full px-3.5 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-white placeholder-zinc-500 text-sm"
+                    value={authForm.emergency_contact} onChange={(e) => setAuthForm({ ...authForm, emergency_contact: e.target.value })}
+                  />
+                </div>
+              </>
+            )}
+
+            <input
+              type="email" placeholder="Email Address" required
+              className="w-full px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/60"
+              value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+            />
+            <input
+              type="password" placeholder="Password (min 6 chars)" required
+              className="w-full px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/60"
+              value={authForm.password} onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+            />
+
+            <button
+              type="submit"
+              className="w-full py-3.5 mt-2 bg-gradient-to-r from-amber-400 to-amber-500 hover:brightness-110 text-zinc-950 rounded-xl font-bold text-sm tracking-wide flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 cursor-pointer"
+            >
+              {isRegister ? 'Create Private Account' : 'Enter Workspace'}
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          </form>
+
+          <button
+            onClick={() => setIsRegister(!isRegister)}
+            className="w-full mt-6 pt-5 border-t border-white/5 text-xs text-zinc-400 hover:text-amber-300 text-center cursor-pointer"
+          >
+            {isRegister ? 'Already registered? Sign in to your workspace' : 'First time here? Create a ForYou AI account'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const tabs = [
+    { id: 'safe_route', label: 'Safe Route', desc: 'Outdoor destination & live path guide', icon: Navigation },
+    { id: 'vision_nav', label: 'Spatial Nav', desc: 'Clock-face obstacle & transit guidance', icon: Compass },
+    { id: 'currency_med', label: 'Currency & Meds', desc: 'Notes, dosage & allergy verification', icon: Banknote },
+    { id: 'sign_bridge', label: 'Sign & Flip Bridge', desc: 'Two-way gesture & caption communicator', icon: Ear },
+    { id: 'memory_vault', label: 'Memory Vault', desc: 'Remember where personal items are placed', icon: Bookmark },
+    { id: 'form_reader', label: 'Form Reader', desc: 'Summarize documents & required fields', icon: FileText },
+  ];
+
+  const activeTabInfo = tabs.find((t) => t.id === activeTab);
+
+  const renderDirectionIcon = (dir) => {
+    switch (dir) {
+      case 'LEFT':
+        return <ArrowUpLeft className="w-7 h-7 text-amber-300" />;
+      case 'RIGHT':
+        return <ArrowUpRight className="w-7 h-7 text-amber-300" />;
+      case 'STOP':
+        return <OctagonAlert className="w-7 h-7 text-rose-400 animate-pulse" />;
+      case 'ARRIVED':
+        return <Flag className="w-7 h-7 text-emerald-400" />;
+      default:
+        return <ArrowUp className="w-7 h-7 text-emerald-400" />;
+    }
+  };
+
+  return (
+    <div className="min-h-screen pb-20">
+      <header className="sticky top-0 z-30 backdrop-blur-xl bg-zinc-950/75 border-b border-white/[0.07]">
+        <div className="max-w-6xl mx-auto px-5 py-4 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shadow-md shadow-amber-500/20">
+              <Sparkles className="w-5 h-5 text-zinc-950" />
+            </div>
+            <div className="flex items-center gap-2.5">
+              <span className="font-serif-display text-2xl tracking-tight text-white">ForYou AI</span>
+              <span className="text-[11px] uppercase tracking-widest px-2.5 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-zinc-300 font-medium">
+                {user?.name}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={() => setVoiceEnabled(!voiceEnabled)}
+              className={`px-3.5 py-2 rounded-xl border text-xs font-semibold flex items-center gap-2 transition cursor-pointer ${
+                voiceEnabled
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                  : 'bg-zinc-900 border-white/10 text-zinc-400'
+              }`}
+            >
+              {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+              {voiceEnabled ? 'Voice Guidance On' : 'Voice Muted'}
+            </button>
+
+            <button
+              onClick={() => runAI('sos_alert', 'EMERGENCY SOS! Analyze immediate surroundings and broadcast safety alert.')}
+              className="px-4 py-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 border border-rose-400/30 text-white text-xs font-bold tracking-wider uppercase flex items-center gap-1.5 shadow-lg shadow-rose-600/25 transition cursor-pointer"
+            >
+              <ShieldAlert className="w-4 h-4" /> Emergency SOS
+            </button>
+
+            <button
+              onClick={handleLogout}
+              className="p-2.5 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 border border-white/10 text-zinc-400 hover:text-white transition cursor-pointer"
+              title="Sign Out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-5 pt-8 space-y-8">
+        <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-amber-400 font-semibold mb-1">
+              Multimodal Sensory Suite
+            </p>
+            <h2 className="font-serif-display text-4xl text-white tracking-tight">
+              {activeTabInfo?.label}
+            </h2>
+            <p className="text-sm text-zinc-400 mt-1">{activeTabInfo?.desc}</p>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-zinc-400 bg-white/[0.03] border border-white/[0.07] px-3.5 py-2 rounded-full">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            {gpsCoords ? `GPS Locked (${gpsCoords.lat}, ${gpsCoords.lng})` : 'Neural Vision & Audio Engine Ready'}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {tabs.map((t) => {
+            const Icon = t.icon;
+            const isActive = activeTab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => {
+                  setActiveTab(t.id);
+                  setAiResult(null);
+                  if (t.id !== 'safe_route') setIsWalkingActive(false);
+                }}
+                className={`p-4 rounded-2xl border text-left transition-all cursor-pointer ${
+                  isActive
+                    ? 'bg-gradient-to-b from-amber-500/20 to-amber-500/5 border-amber-400/50 shadow-lg shadow-amber-500/10'
+                    : 'glass-card'
+                }`}
+              >
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center mb-3 ${
+                  isActive ? 'bg-amber-400 text-zinc-950' : 'bg-white/[0.06] text-zinc-300'
+                }`}>
+                  <Icon className="w-4 h-4" />
+                </div>
+                <p className={`font-semibold text-sm ${isActive ? 'text-white' : 'text-zinc-300'}`}>
+                  {t.label}
+                </p>
+                <p className="text-[11px] text-zinc-500 mt-0.5 line-clamp-1">{t.desc}</p>
+              </button>
+            );
+          })}
+        </div>
+
+        {activeTab === 'safe_route' && (
+          <div className="glass-panel rounded-3xl p-6 space-y-4 border border-amber-500/20">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <MapPin className="w-4 h-4 text-amber-400" />
+                <span className="text-xs uppercase tracking-[0.18em] text-amber-300 font-bold">
+                  Outdoor Destination & Live Safe-Path Command
+                </span>
+              </div>
+              {destination && (
+                <a
+                  href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}&travelmode=walking`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-zinc-300 hover:text-amber-300 inline-flex items-center gap-1 underline"
+                >
+                  Open Walking Map <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-1 flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Where do you want to go? (e.g., Nearest Bus Stop, Pharmacy, Main Road)"
+                  className="flex-1 px-4 py-3.5 rounded-xl bg-zinc-900/90 border border-white/10 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/60"
+                  value={destination}
+                  onChange={(e) => setDestination(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={listenForDestination}
+                  className={`px-4 rounded-xl border flex items-center gap-2 text-xs font-bold uppercase tracking-wider cursor-pointer ${
+                    isVoiceDestListening
+                      ? 'bg-rose-600 border-rose-400 text-white animate-pulse'
+                      : 'bg-zinc-900 hover:bg-zinc-800 border-white/15 text-amber-300'
+                  }`}
+                  title="Speak Destination"
+                >
+                  <Mic className="w-4 h-4" />
+                  <span className="hidden md:inline">{isVoiceDestListening ? 'Listening...' : 'Speak Place'}</span>
+                </button>
+              </div>
+
+              {!isWalkingActive ? (
+                <button
+                  onClick={() => startSafeWalk()}
+                  className="px-6 py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer"
+                >
+                  <Play className="w-4 h-4 fill-current" /> Start Safe Walk (Auto-Guide)
+                </button>
+              ) : (
+                <button
+                  onClick={stopSafeWalk}
+                  className="px-6 py-3.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs uppercase tracking-wider flex items-center justify-center gap-2 animate-pulse cursor-pointer"
+                >
+                  <Square className="w-4 h-4 fill-current" /> Stop Walk Guide
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-zinc-500 uppercase tracking-wider mr-1">Quick Places:</span>
+              {QUICK_DESTINATIONS.map((place) => (
+                <button
+                  key={place}
+                  onClick={() => startSafeWalk(place)}
+                  className={`px-3 py-1.5 rounded-full text-xs border transition cursor-pointer ${
+                    destination === place
+                      ? 'bg-amber-400/20 border-amber-400 text-amber-200 font-semibold'
+                      : 'bg-zinc-900/80 border-white/10 text-zinc-300 hover:border-amber-400/40'
+                  }`}
+                >
+                  {place}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="grid lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-6 glass-panel rounded-3xl p-5 flex flex-col justify-between space-y-4">
+            <div className="relative aspect-video bg-zinc-950 rounded-2xl overflow-hidden border border-white/10 flex items-center justify-center">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className={`w-full h-full object-cover ${cameraOn && !uploadedImage ? '' : 'hidden'}`}
+              />
+              {uploadedImage && (
+                <img src={uploadedImage} alt="Uploaded preview" className="w-full h-full object-contain bg-zinc-950" />
+              )}
+
+              {(cameraOn || uploadedImage) && (
+                <div className="absolute top-3 left-3 right-3 flex items-center justify-between">
+                  <div className="px-2.5 py-1 rounded-full bg-black/65 backdrop-blur-md border border-white/10 flex items-center gap-1.5 text-[11px] font-medium text-emerald-300">
+                    <Radio className="w-3 h-3 animate-pulse" />
+                    {uploadedImage ? 'Uploaded Photo Ready' : isWalkingActive ? 'Auto-Guiding Every 6s' : 'Live Optical Feed'}
+                  </div>
+                  <div className="flex gap-1.5">
+                    {uploadedImage && (
+                      <button
+                        onClick={startCamera}
+                        className="px-2.5 py-1 rounded-full bg-black/75 text-[11px] text-white border border-white/15 cursor-pointer"
+                      >
+                        Use Camera
+                      </button>
+                    )}
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="px-2.5 py-1 rounded-full bg-black/75 text-[11px] text-amber-300 border border-white/15 cursor-pointer"
+                    >
+                      Upload Photo
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!cameraOn && !uploadedImage && (
+                <div className="text-center p-6">
+                  <div className="w-14 h-14 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-center mx-auto mb-3">
+                    <Eye className="w-6 h-6 text-amber-400" />
+                  </div>
+                  <p className="text-sm text-zinc-400 mb-4">Activate camera lens or upload a photo to identify</p>
+                  <div className="flex flex-wrap items-center justify-center gap-2.5">
+                    <button
+                      onClick={startCamera}
+                      className="px-4 py-2.5 bg-white text-zinc-950 hover:bg-amber-300 rounded-xl font-semibold text-xs tracking-wide uppercase inline-flex items-center gap-2 transition cursor-pointer"
+                    >
+                      <Camera className="w-4 h-4" /> Activate Camera Lens
+                    </button>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="px-4 py-2.5 bg-zinc-900 hover:bg-zinc-800 border border-white/15 text-zinc-200 rounded-xl font-semibold text-xs tracking-wide uppercase inline-flex items-center gap-2 transition cursor-pointer"
+                    >
+                      <Upload className="w-4 h-4 text-amber-400" /> Upload Photo
+                    </button>
+                  </div>
+                </div>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleImageUpload}
+                className="hidden"
+              />
+              <canvas ref={canvasRef} className="hidden" />
+            </div>
+
+            <div className="space-y-3">
+              <input
+                type="text"
+                placeholder={
+                  activeTab === 'safe_route'
+                    ? 'Ask route question (e.g., "Is there a crosswalk ahead?" or "Read the street board")...'
+                    : activeTab === 'memory_vault'
+                    ? 'Ask or save: "Remember my keys on the wooden desk"'
+                    : 'Optional context (e.g., "Identify this object" or "Check expiry date")...'
+                }
+                className="w-full px-4 py-3.5 rounded-xl bg-zinc-900/90 border border-white/10 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/60 transition"
+                value={promptText}
+                onChange={(e) => setPromptText(e.target.value)}
+              />
+              <button
+                onClick={() => runAI()}
+                disabled={loading}
+                className="w-full py-4 bg-gradient-to-r from-amber-400 via-amber-500 to-amber-400 hover:brightness-110 disabled:opacity-50 text-zinc-950 rounded-xl font-bold text-sm tracking-wide uppercase shadow-lg shadow-amber-500/20 transition cursor-pointer"
+              >
+                {loading
+                  ? 'Scanning Surroundings...'
+                  : activeTab === 'safe_route'
+                  ? 'Scan Path & Guide Now'
+                  : 'Capture & Analyze'}
+              </button>
+            </div>
+          </div>
+
+          <div className="lg:col-span-6 glass-panel rounded-3xl p-6 flex flex-col justify-between space-y-5">
+            {activeTab === 'sign_bridge' && aiResult && (
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-indigo-950/90 to-zinc-900 border border-indigo-400/30 rotate-180 text-center shadow-inner">
+                <p className="text-[10px] uppercase tracking-[0.25em] text-indigo-300 mb-1.5">
+                  Listener Display (Flipped View)
+                </p>
+                <p className="text-xl font-semibold text-white leading-snug">{aiResult.en}</p>
+              </div>
+            )}
+
+            <div className="flex-1 flex flex-col">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs uppercase tracking-[0.18em] text-zinc-400 font-semibold">
+                  {activeTab === 'safe_route' ? 'Live Safe-Route Voice Guidance' : 'AI Sensory Readout'}
+                </span>
+                {aiResult && (
+                  <button
+                    onClick={() => speakText(aiResult.en, true)}
+                    className="px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-xs font-medium text-amber-300 flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Volume2 className="w-3.5 h-3.5" /> Speak Again
+                  </button>
+                )}
+              </div>
+
+              {aiResult ? (
+                <div
+                  className={`flex-1 p-6 rounded-2xl border flex flex-col justify-center space-y-4 ${
+                    aiResult.hazard
+                      ? 'bg-rose-950/35 border-rose-500/40'
+                      : 'bg-zinc-900/70 border-white/10'
+                  }`}
+                >
+                  {activeTab === 'safe_route' && (
+                    <div className="flex items-center gap-3.5 p-3.5 rounded-2xl bg-black/40 border border-white/10">
+                      <div className="w-12 h-12 rounded-xl bg-white/[0.06] flex items-center justify-center shrink-0">
+                        {renderDirectionIcon(aiResult.turn_direction)}
+                      </div>
+                      <div>
+                        <p className="text-[11px] uppercase tracking-widest text-zinc-400">
+                          Recommended Action
+                        </p>
+                        <p className="text-lg font-extrabold text-white tracking-wide">
+                          {aiResult.turn_direction || 'PROCEED CAREFULLY'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    {aiResult.hazard ? (
+                      <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-rose-400 bg-rose-500/15 px-2.5 py-1 rounded-full">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Obstacle / Traffic Caution
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-full">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Safe Path Verified
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-lg md:text-xl font-medium text-zinc-100 leading-relaxed">
+                    {aiResult.en}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex-1 p-8 rounded-2xl bg-zinc-900/40 border border-dashed border-white/10 flex flex-col items-center justify-center text-center">
+                  <Navigation className="w-7 h-7 text-amber-400/60 mb-3" />
+                  <p className="text-sm text-zinc-300 font-medium">
+                    {activeTab === 'safe_route'
+                      ? 'Speak or Choose a Destination Above'
+                      : 'Awaiting Visual or Text Input'}
+                  </p>
+                  <p className="text-xs text-zinc-500 mt-1 max-w-sm leading-relaxed">
+                    {activeTab === 'safe_route'
+                      ? 'Tap "Speak Place" or "Start Safe Walk" to continuously scan sidewalks, crosswalks, signs, and obstacles as you move.'
+                      : 'Point your camera at pathways, currency notes, medicine labels, or documents and select Capture & Analyze.'}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {activeTab === 'sign_bridge' && (
+              <div className="p-4 rounded-2xl bg-zinc-900/80 border border-white/10">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
+                    Live Voice-to-Text Captions
+                  </span>
+                  <button
+                    onClick={toggleListening}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                      isListening
+                        ? 'bg-rose-600 text-white animate-pulse'
+                        : 'bg-amber-400 text-zinc-950 hover:bg-amber-300'
+                    }`}
+                  >
+                    <Mic className="w-3.5 h-3.5" /> {isListening ? 'Listening...' : 'Transcribe Speaker'}
+                  </button>
+                </div>
+                <p className="text-sm text-zinc-200 font-medium min-h-[24px]">
+                  {liveTranscript || 'Tap "Transcribe Speaker" to convert nearby speech into live text...'}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {activeTab === 'sign_bridge' && (
+          <div className="glass-panel rounded-3xl p-6 space-y-5">
+            <div>
+              <h3 className="font-serif-display text-2xl text-white">Quick Phrase & Gesture Cards</h3>
+              <p className="text-xs text-zinc-400">Tap any saved card to speak it aloud immediately</p>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {gestures.map((g) => (
+                <button
+                  key={g.id}
+                  onClick={() => {
+                    setAiResult({ en: g.spoken_phrase_en, hazard: false });
+                    speakText(g.spoken_phrase_en, true);
+                  }}
+                  className="p-4 rounded-2xl glass-card text-left group cursor-pointer"
+                >
+                  <p className="font-semibold text-amber-300 text-sm group-hover:text-amber-200">
+                    {g.gesture_name}
+                  </p>
+                  <p className="text-xs text-zinc-400 mt-1 line-clamp-2">{g.spoken_phrase_en}</p>
+                </button>
+              ))}
+            </div>
+
+            <form onSubmit={handleSaveGesture} className="grid sm:grid-cols-3 gap-3 pt-4 border-t border-white/[0.07]">
+              <input
+                type="text" placeholder="Card Title (e.g., Medical Help)" required
+                className="px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-sm text-white placeholder-zinc-500"
+                value={newGesture.gesture_name} onChange={(e) => setNewGesture({ ...newGesture, gesture_name: e.target.value })}
+              />
+              <input
+                type="text" placeholder="Spoken Sentence (e.g., I need assistance please)" required
+                className="px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/10 text-sm text-white placeholder-zinc-500"
+                value={newGesture.spoken_phrase_en} onChange={(e) => setNewGesture({ ...newGesture, spoken_phrase_en: e.target.value })}
+              />
+              <button
+                type="submit"
+                className="py-3 bg-white text-zinc-950 hover:bg-amber-300 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" /> Add Quick Card
+              </button>
+            </form>
+          </div>
+        )}
+
+        <div className="glass-panel rounded-3xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2.5">
+              <History className="w-5 h-5 text-amber-400" />
+              <h3 className="font-serif-display text-2xl text-white">Sensory Log & Route History</h3>
+            </div>
+            <span className="text-xs text-zinc-500">{history.length} entries</span>
+          </div>
+
+          <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+            {history.length === 0 ? (
+              <p className="text-sm text-zinc-500 py-4 text-center">
+                Your outdoor route guidance and analyzed scans will appear here.
+              </p>
+            ) : (
+              history.map((item) => (
+                <div
+                  key={item.id}
+                  className="p-4 rounded-2xl bg-zinc-900/60 border border-white/[0.06] hover:border-white/15 flex justify-between items-center gap-4 transition"
+                >
+                  <div className="space-y-1">
+                    <span className="inline-block text-[10px] uppercase tracking-widest px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 font-semibold">
+                      {item.feature_type.replace('_', ' ')}
+                    </span>
+                    <p className="text-sm text-zinc-200 leading-relaxed">{item.ai_response_en}</p>
+                  </div>
+                  <button
+                    onClick={() => speakText(item.ai_response_en, true)}
+                    className="p-2.5 rounded-xl bg-white/[0.05] hover:bg-amber-400 hover:text-zinc-950 text-zinc-300 transition shrink-0 cursor-pointer"
+                    title="Play Audio"
+                  >
+                    <Volume2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
