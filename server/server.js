@@ -119,7 +119,7 @@ app.post('/api/gestures', authMiddleware, async (req, res) => {
   res.json(data);
 });
 
-// --- UNIVERSAL MULTIMODAL AI ENGINE ---
+// --- UNIVERSAL MULTIMODAL AI & VOICE COMMUNICATOR ENGINE ---
 app.post('/api/ai/analyze', authMiddleware, async (req, res) => {
   try {
     const { feature_type, prompt_text, image_base64, location_info, destination } = req.body;
@@ -128,29 +128,29 @@ app.post('/api/ai/analyze', authMiddleware, async (req, res) => {
     const { data: userGestures } = await supabase.from('custom_gestures').select('*').eq('user_id', req.user.id);
 
     const systemInstructions = {
-      safe_route: `You are ForYou AI Outdoor Safe-Route Navigator guiding a blind pedestrian to their destination: "${destination || prompt_text || 'Nearest Safe Footpath'}".
+      safe_route: `You are ForYou AI Outdoor Safe-Route Navigator & Voice Communicator guiding a blind pedestrian to their destination: "${destination || prompt_text || 'Nearest Safe Footpath'}".
 Live GPS & Telemetry: "${location_info || 'GPS active'}".
-Analyze the live camera view of the street/surroundings carefully:
+If a camera image is provided:
 1. Identify the safest walking path using Clock-Face Directions (e.g., "Walk straight along the 11 o'clock sidewalk", "Step left to 10 o'clock to avoid parked bike").
 2. Spot street signs, shop boards, bus stops, crosswalks, traffic signals, stairs, open drains, potholes, or oncoming vehicles.
-3. Determine if the destination or a helpful landmark is visible in the frame.
-4. Set hazard: true immediately if there is traffic, a red pedestrian signal, stairs, open drain, or a blocking obstacle.
-Return strictly valid JSON: {
-  "en": "Calm, concise 1-2 sentence step-by-step walking instruction with clock-face direction",
+3. Set hazard: true immediately if there is traffic, a red pedestrian signal, stairs, open drain, or a blocking obstacle.
+If no camera image is provided, answer the user's spoken navigation or location question helpfully in 1-2 short spoken sentences.
+Return strictly valid JSON with no markdown: {
+  "en": "Calm, concise 1-2 sentence spoken response with clock-face direction if image is attached",
   "turn_direction": "STRAIGHT" | "LEFT" | "RIGHT" | "STOP" | "ARRIVED",
-  "landmark_spotted": "Short label of visible sign, road feature, or landmark (e.g. Crosswalk Ahead, Pharmacy Sign, Clear Footpath)",
+  "landmark_spotted": "Short label of visible sign, road feature, or landmark",
   "hazard": true/false
 }`,
-      vision_nav: `You are ForYou AI Spatial Navigator for a blind/low-vision user. Analyze the camera image. Give precise clock-face directions (e.g., "12 o'clock stairs ahead", "10 o'clock clear walkway"), read bus numbers or shop boards, and warn of obstacles. Return strictly valid JSON: {"en": "concise English guidance", "hazard": true/false}`,
-      currency_med: `You are ForYou AI Safety Guard. User medical allergies: "${userProfile?.allergies || 'None'}". Identify currency notes (denomination and total), medicine names, dosage, expiry dates, or food allergens. Set hazard: true if expired or matching allergies. Return strictly valid JSON: {"en": "clear English safety alert", "hazard": true/false}`,
+      vision_nav: `You are ForYou AI Spatial Navigator & Voice Assistant for a blind/low-vision user. Analyze the camera image if provided, or answer the user's spoken question clearly. Give precise clock-face directions (e.g., "12 o'clock stairs ahead", "10 o'clock clear walkway"), read bus numbers or shop boards, and warn of obstacles. Return strictly valid JSON: {"en": "concise English spoken guidance", "hazard": true/false}`,
+      currency_med: `You are ForYou AI Safety Guard. User medical allergies: "${userProfile?.allergies || 'None'}". Identify currency notes (denomination and total), medicine names, dosage, expiry dates, or food allergens. Set hazard: true if expired or matching allergies. Return strictly valid JSON: {"en": "clear English spoken safety alert", "hazard": true/false}`,
       sign_bridge: `You are ForYou AI Sign Language & AAC Interpreter. User's saved custom gestures: ${JSON.stringify(userGestures || [])}. Interpret hand gestures in the image or expand quick keywords into a polite spoken sentence. Return strictly valid JSON: {"en": "spoken English sentence", "hazard": false}`,
-      memory_vault: `You are ForYou AI Personal Memory Assistant. Describe the object and its exact surroundings/landmarks so the user can locate it later, or answer where an item was placed. Return strictly valid JSON: {"en": "detailed English memory response", "hazard": false}`,
+      memory_vault: `You are ForYou AI Personal Memory Assistant. Describe the object and its exact surroundings/landmarks so the user can locate it later, or answer where an item was placed. Return strictly valid JSON: {"en": "detailed English spoken memory response", "hazard": false}`,
       sos_alert: `EMERGENCY SOS from ForYou AI! Describe the user's exact surroundings, street landmarks, crowd level, and immediate hazards from the image to guide rescuers. GPS: ${location_info || 'Unknown'}. Guardian Contact: ${userProfile?.emergency_contact || 'Not set'}. Return strictly valid JSON: {"en": "Urgent rescue summary in English", "hazard": true}`,
-      form_reader: `You are ForYou AI Document Assistant. Read this form or document image. Summarize what it is for and list the key required fields clearly. Return strictly valid JSON: {"en": "English summary and fields", "hazard": false}`
+      form_reader: `You are ForYou AI Document Assistant. Read this form or document image. Summarize what it is for and list the key required fields clearly. Return strictly valid JSON: {"en": "English spoken summary and fields", "hazard": false}`
     };
 
     const contents = [
-      { text: `${systemInstructions[feature_type] || systemInstructions.vision_nav}\nUser command/query: ${prompt_text || 'Guide me safely.'}` }
+      { text: `${systemInstructions[feature_type] || systemInstructions.vision_nav}\nUser spoken command/query: ${prompt_text || 'Guide me safely.'}` }
     ];
 
     if (image_base64) {
@@ -163,7 +163,7 @@ Return strictly valid JSON: {
     }
 
     let response;
-    const fallbackModels = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+    const fallbackModels = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
     let lastError;
 
     for (const modelName of fallbackModels) {
@@ -193,7 +193,8 @@ Return strictly valid JSON: {
 
     if (!response) throw lastError;
 
-    const parsed = JSON.parse(response.text);
+    const cleanText = response.text.replace(/```json\s*|```/g, '').trim();
+    const parsed = JSON.parse(cleanText);
 
     const { data: savedLog } = await supabase
       .from('ai_history')
