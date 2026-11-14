@@ -4,7 +4,6 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import axios from 'axios';
 import { GoogleGenAI } from '@google/genai';
 import { supabase } from './db.js';
 
@@ -18,6 +17,18 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '15mb' }));
+
+// --- NATIVE FETCH HELPER (ZERO EXTRA DEPENDENCIES) ---
+async function fetchJson(url, headers = {}, timeoutMs = 8000) {
+  const res = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return await res.json();
+}
 
 // --- ZOD VALIDATION ---
 const registerSchema = z.object({
@@ -139,7 +150,6 @@ app.post('/api/maps/route', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Origin GPS coordinates and destination are required.' });
   }
 
-  // Clean filler words like "nearest" so OpenStreetMap finds the closest matching place near user GPS
   const cleanQuery = destination.replace(/\b(nearest|nearby|closest|find|the)\b/gi, '').replace(/\s+/g, ' ').trim() || destination;
   let resolvedName = destination;
   let destCoords = null;
@@ -147,11 +157,12 @@ app.post('/api/maps/route', authMiddleware, async (req, res) => {
   try {
     // 1. Search real-world place biased to user's live GPS (Free Photon OpenStreetMap Geocoder)
     try {
-      const photonRes = await axios.get(
+      const photonData = await fetchJson(
         `https://photon.komoot.io/api/?q=${encodeURIComponent(cleanQuery)}&limit=1&lang=en&lat=${originLat}&lon=${originLng}`,
-        { timeout: 7000 }
+        {},
+        7000
       );
-      const feature = photonRes.data?.features?.[0];
+      const feature = photonData?.features?.[0];
       if (feature?.geometry?.coordinates) {
         const [lng, lat] = feature.geometry.coordinates;
         destCoords = { lat, lng };
@@ -164,16 +175,17 @@ app.post('/api/maps/route', authMiddleware, async (req, res) => {
     if (!destCoords) {
       const delta = 0.08;
       const viewbox = `${Number(originLng) - delta},${Number(originLat) + delta},${Number(originLng) + delta},${Number(originLat) - delta}`;
-      const nomRes = await axios.get(
+      const nomData = await fetchJson(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanQuery)}&viewbox=${viewbox}&limit=1`,
-        { headers: { 'User-Agent': 'ForYouAI-AccessibilityApp/1.0' }, timeout: 7000 }
+        { 'User-Agent': 'ForYouAI-AccessibilityApp/1.0' },
+        7000
       );
-      if (nomRes.data?.[0]) {
+      if (nomData?.[0]) {
         destCoords = {
-          lat: parseFloat(nomRes.data[0].lat),
-          lng: parseFloat(nomRes.data[0].lon)
+          lat: parseFloat(nomData[0].lat),
+          lng: parseFloat(nomData[0].lon)
         };
-        resolvedName = nomRes.data[0].display_name.split(',').slice(0, 2).join(', ');
+        resolvedName = nomData[0].display_name.split(',').slice(0, 2).join(', ');
       }
     }
 
@@ -183,8 +195,8 @@ app.post('/api/maps/route', authMiddleware, async (req, res) => {
 
     // 3. Generate real-world pedestrian turn-by-turn walking route (Free OSRM Foot Router)
     const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${originLng},${originLat};${destCoords.lng},${destCoords.lat}?steps=true&geometries=geojson&overview=full`;
-    const osrmRes = await axios.get(osrmUrl, { timeout: 8000 });
-    const route = osrmRes.data?.routes?.[0];
+    const osrmData = await fetchJson(osrmUrl, {}, 8000);
+    const route = osrmData?.routes?.[0];
     const rawSteps = route?.legs?.[0]?.steps || [];
 
     if (!rawSteps.length) {
